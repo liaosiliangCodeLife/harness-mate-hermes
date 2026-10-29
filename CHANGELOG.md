@@ -2,6 +2,11 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.5 — 2026-10-29 21:02
+- 新增：风险审批 —— 覆写 `_send_exec_approval_prompt`，发 `data.approval` 帧到网关（由网关上报平台 `/internal/approvals`），并发送文本兜底；后台轮询 `GET /internal/approvals/lookup`，决策后调用 `tools.approval.resolve_gateway_approval` 解阻塞
+- 新增可选环境变量：`HARNESS_MATE_INTERNAL_TOKEN`（审批轮询）、`HARNESS_MATE_API_BASE`（缺省 `https://harness.alltman.com/api`）
+- 发布版本：插件 `0.6.4` → `0.6.5`
+
 ## 0.6.4 — 2026-10-29 19:10
 - 修复：插件发送图片/文件时平台前端显示空白气泡 —— reply 帧补 `files` 数组（`{url, name, media_kind, is_image}`），与平台 `save_reply` 的 `inner["files"]` 契约对齐；原来只发 `url`/`file_name`/`media_type`，平台不读这三个字段，导致 `message_info` 为空、附件丢失（保留旧字段兼容老平台）
 

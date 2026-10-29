@@ -1,35 +1,8 @@
 # Hermes 插件（HarnessMate）
 
-Hermes Agent 的平台适配器：把本机 Hermes 接到 [HarnessMate](https://github.com/liaosiliangCodeLife/harness-mate-plat) 平台，手机/浏览器即可与它对话，并支持平台「房间」里的多智能体协作。
+Hermes Agent 的平台适配器：把本机 Hermes 接到 HarnessMate 平台，手机/浏览器即可与它对话。
 
-> 本仓库是插件的**独立发布仓库**。平台仓库 `harness-mate-plat/plugin/hermes` 里有一份同步副本，**改插件要两边一起改**。
->
-> DSH（DeepSeek Harness）插件在另一个仓库：[harness-mate-dsh](https://github.com/liaosiliangCodeLife/harness-mate-dsh)。
-
-## 快速开始
-
-```bash
-git clone https://github.com/liaosiliangCodeLife/harness-mate-hermes.git
-cd harness-mate-hermes
-bash install.sh          # 拷到 ~/.hermes/plugins/HarnessMate/ 并提示填 bot_id / bot_key
-```
-
-手动方式：把本目录整体拷到 `~/.hermes/plugins/HarnessMate/`，在 Hermes 配置里填 `bot_id` / `bot_key`（平台「智能体 → 接入信息」），然后**重启 Hermes 网关**让插件重新加载（`hermes gateway status` 可确认）。
-
-详细安装与排障见 [INSTALL.md](INSTALL.md)。
-
-## 能力
-
-| 能力 | 说明 |
-|---|---|
-| WS 网关连接 | `wss://ws-agent.alltman.com:1443/ws`，`bot_id` + `bot_key`（HS256 JWT）鉴权 |
-| 文本对话 | 平台消息 → Hermes `MessageEvent`；回复走流式 `reply` 帧（`delta` 多帧 + 末帧 `done`） |
-| 图片 / 文件 | 双向：入站下载到本机交给 agent，出站上传平台 open-api 再发 |
-| 房间协作（P3） | 入站带 `room_id` 时用 `room:<room_id>` 作独立会话键（与私聊上下文隔离），回包带回 `room_id` + `reply_to` + `bot_id` |
-| 主动推送 | 定时任务/通知可主动推到平台会话（`thread_id` 多级兜底） |
-
-
-版本：`0.6.3`（`plugin.yaml`）｜协议：`hermes_channel_protocol.md`
+版本：`0.6.5`（`plugin.yaml`）｜协议：`hermes_channel_protocol.md`
 
 ---
 
@@ -95,8 +68,14 @@ HarnessMate 平台 ──HTTP/SSE──> Flask API ──HTTP──> Hub ──W
 | `HARNESS_MATE_ALLOW_ALL_DEVICES` | 否 | 开发用，放开全部 peer（生产别开） |
 | `HARNESS_MATE_DM_POLICY` | 否 | `open`（默认）/`allowlist`/`disabled` |
 | `HARNESS_MATE_UPLOAD_URL` | 否 | 上传接口地址，默认 `https://harness.alltman.com/api/open-api/upload-file` |
+| `HARNESS_MATE_API_BASE` | 否 | 平台 HTTP API 根（含 `/api`），审批轮询；默认 `https://harness.alltman.com/api` |
+| `HARNESS_MATE_INTERNAL_TOKEN` | 否 | 平台 `INTERNAL_TOKEN`；不填则审批只能靠对话 `/approve`，无法轮询决策 |
 
 网关地址在 `adapter.py` 顶部常量 `WS_GATEWAY_WS_URL`（形如 `wss://ws-agent.alltman.com:1443/ws`）。
+
+### 风险审批
+
+高危命令会发 `approval` 帧到平台「授权」页；配好 `HARNESS_MATE_INTERNAL_TOKEN` 后插件自动轮询决策并解阻塞。也可用对话 `/approve` / `/deny` 兜底。
 
 ## 五、安装与排障
 
