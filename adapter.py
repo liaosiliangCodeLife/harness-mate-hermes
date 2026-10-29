@@ -913,6 +913,14 @@ class HarnessMateAdapter(BasePlatformAdapter):
             "url": url,
             "file_name": file_name,
             "media_type": media_type,
+            "files": [
+                {
+                    "url": url,
+                    "name": file_name or "",
+                    "media_kind": media_type,
+                    "is_image": media_type == "image",
+                }
+            ],
         }
         fingerprint = json.dumps(reply_data, ensure_ascii=False, sort_keys=True)
         cache_key = f"{to_ws_session}:{thread_id}:{message_id}:file"

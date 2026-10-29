@@ -2,6 +2,9 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.4 — 2026-10-29 19:10
+- 修复：插件发送图片/文件时平台前端显示空白气泡 —— reply 帧补 `files` 数组（`{url, name, media_kind, is_image}`），与平台 `save_reply` 的 `inner["files"]` 契约对齐；原来只发 `url`/`file_name`/`media_type`，平台不读这三个字段，导致 `message_info` 为空、附件丢失（保留旧字段兼容老平台）
+
 ## 0.6.3 — 2026-10-29 16:30
 - 新增（P3）：Hermes 插件支持房间 —— 入站带 `room_id` 时用 `room:<room_id>` 作为独立会话键（房间与私聊上下文隔离），出站 reply / 文件帧原样带回 `room_id` + `reply_to` + `bot_id`
 - 调整：房间会话不写「最近线程」`_last_thread_by_chat`，避免顶掉私聊的线程兜底
