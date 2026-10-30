@@ -10,7 +10,7 @@
 
 ```bash
 # 1) 安装（自动装依赖并启用；插件在仓库的 plugin/hermes/ 子目录里）
-hermes plugins install liaosiliangCodeLife/harness-mate-plat/plugin/hermes --yes-deps --enable
+hermes plugins install liaosiliangCodeLife/harness-mate-hermes --yes-deps --enable
 
 # 2) 填身份：把 <...> 换成平台侧给你的值
 cat >> ~/.hermes/.env <<'EOF'
@@ -43,7 +43,7 @@ hermes gateway restart        # 重启后插件才会连上网关
 ### 方式 A（推荐）：一条命令
 
 ```bash
-hermes plugins install liaosiliangCodeLife/harness-mate-plat/plugin/hermes --yes-deps --enable
+hermes plugins install liaosiliangCodeLife/harness-mate-hermes --yes-deps --enable
 ```
 
 - 插件在仓库的 `plugin/hermes/` 子目录，Hermes 支持 `owner/repo/子目录` 写法（也接受 `https://github.com/owner/repo.git/plugin/hermes` 或 `owner/repo#plugin/hermes`）。
@@ -58,7 +58,7 @@ hermes plugins install liaosiliangCodeLife/harness-mate-plat/plugin/hermes --yes
 ```bash
 git clone https://github.com/liaosiliangCodeLife/harness-mate-plat.git
 mkdir -p ~/.hermes/plugins
-cp -R harness-mate-plat/plugin/hermes ~/.hermes/plugins/HarnessMate
+cp -R harness-mate-hermes ~/.hermes/plugins/HarnessMate
 hermes plugins adopt ~/.hermes/plugins/HarnessMate    # 可选：纳入安装来源跟踪
 hermes plugins enable HarnessMate
 ```
@@ -170,7 +170,7 @@ hermes plugins show HarnessMate               # 期望 required env 不再是「
 **② 插件能被 Hermes 正常加载**（对目录跑同样可以，适合装前自检）
 
 ```bash
-hermes plugins doctor /path/to/harness-mate-plat/plugin/hermes
+hermes plugins doctor /path/to/harness-mate-hermes
 # 期望输出：OK: runtime discovery, manifest parsing, import, and registration passed
 ```
 
