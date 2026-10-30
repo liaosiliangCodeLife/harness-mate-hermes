@@ -798,6 +798,13 @@ class HarnessMateAdapter(BasePlatformAdapter):
             reply_data["delta"] = True
         if is_final:
             reply_data["done"] = True
+            try:
+                from . import tool_trace as _tt
+                _steps = _tt.drain()
+            except Exception:
+                _steps = []
+            if _steps:
+                reply_data["agent_thoughts"] = _steps
         reasoning = metadata.get("reasoning")
         if reasoning:
             reply_data["reasoning"] = reasoning
@@ -1836,6 +1843,48 @@ def _patch_harness_mate_thread_metadata() -> None:
         logger.debug("harness_mate 跳过 GatewayRunner 线程元数据补丁", exc_info=True)
 
     globals()["_HARNESS_MATE_THREAD_METADATA_PATCHED"] = True
+
+    try:
+        import sys as _sys2
+        _gw_agent_mod = _sys2.modules.get("hermes_cli.gateway_agent")
+        _GatewayAgent = getattr(_gw_agent_mod, "GatewayAgent", None) if _gw_agent_mod else None
+        if _GatewayAgent is None:
+            logger.debug("harness_mate 跳过工具事件补丁 (hermes_cli.gateway_agent 未加载)")
+        elif not getattr(_GatewayAgent, "_hm_tool_trace_patched", False):
+            from . import tool_trace as _tool_trace
+
+            _orig_on_tool_start = _GatewayAgent._on_tool_start
+            _orig_on_tool_complete = _GatewayAgent._on_tool_complete
+
+            def _hm_on_tool_start(self, payload, stream_callback, starts):
+                try:
+                    name = payload.get("name") or payload.get("tool_name") or "tool"
+                    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+                    call_id = payload.get("tool_id") or payload.get("tool_call_id") or ""
+                    _tool_trace.record_start(str(call_id), str(name), args)
+                except Exception:
+                    logger.debug("harness_mate 记录工具开始失败", exc_info=True)
+                return _orig_on_tool_start(self, payload, stream_callback, starts)
+
+            def _hm_on_tool_complete(self, payload, stream_callback, starts):
+                try:
+                    name = payload.get("name") or payload.get("tool_name") or "tool"
+                    call_id = payload.get("tool_id") or payload.get("tool_call_id") or ""
+                    duration = float(payload.get("duration_s") or 0.0)
+                    _tool_trace.record_complete(
+                        str(call_id), str(name), duration,
+                        bool(payload.get("is_error")), payload.get("result"),
+                    )
+                except Exception:
+                    logger.debug("harness_mate 记录工具完成失败", exc_info=True)
+                return _orig_on_tool_complete(self, payload, stream_callback, starts)
+
+            _GatewayAgent._on_tool_start = _hm_on_tool_start
+            _GatewayAgent._on_tool_complete = _hm_on_tool_complete
+            _GatewayAgent._hm_tool_trace_patched = True
+            globals()["_HARNESS_MATE_TOOL_TRACE_PATCHED"] = True
+    except Exception:
+        logger.debug("harness_mate 跳过工具事件补丁", exc_info=True)
 
 
 def register(ctx) -> None:

@@ -2,6 +2,10 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.7 — 2026-10-30 09:10
+- 新增：采集 GatewayAgent 工具事件，随 done 帧上报 agent_thoughts（供平台侧 AgentThought 展示执行过程）
+- 发布版本：插件 `0.6.6` → `0.6.7`
+
 ## 0.6.6 — 2026-10-29 21:16
 - 修复：房间里 agent 发图片/文件失败 —— 房间消息的 `thread_id` 是 `room:<id>`，平台没有对应 conversation，免登录上传接口按 `Conversation.thread_id` 查会话必定 404（`thread_id 对应的会话不存在或不属于该智能体`）。`upload_open_api_file` 新增可选 `room_id` 形参并写入 multipart；`_deliver_local_file` 从 `_room_fields(thread_id)` 取出 room_id 透传，后端据此按「该 agent 是该房间已加入成员」兜底放行
 - 配套服务端：`/open-api/upload-file` 接受可选 `room_id`（平台 0.3.37+），仅在 thread_id 查不到会话时启用兜底，越权仍拒
