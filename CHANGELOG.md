@@ -2,6 +2,13 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.11 — 2026-11-01 23:33
+- 新增：回复帧附带 `plugin_version`（读 plugin.yaml）与 `hermes_version`（hermes_cli.__version__ → 包元数据 → VERSION 文件，三级兜底），模块级缓存，取不到则不带该字段、绝不影响发消息
+- 用途：平台把版本写进 agent_info，智能体详情「扩展信息」展示 Hermes 版本与插件版本
+- 发布版本：插件 `0.6.10` → `0.6.11`
+
+
+
 
 ## 0.6.10 — 2026-11-01 21:35
 - 移除：审批决策 HTTP 轮询与 `HARNESS_MATE_INTERNAL_TOKEN` 配置项 —— 插件现在**只需要 `bot_id` + `bot_key`**，不需要任何平台内部令牌

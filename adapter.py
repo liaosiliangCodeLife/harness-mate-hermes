@@ -66,6 +66,67 @@ from gateway.platforms.helpers import MessageDeduplicator
 
 logger = logging.getLogger(__name__)
 
+_VERSION_INFO_CACHE: Optional[Dict[str, str]] = None
+
+
+def _collect_version_info() -> Dict[str, str]:
+    """
+    * @Author Leon-liao
+    * @Function: _collect_version_info()
+    * @Description //收集 Hermes 与插件版本；进程内缓存，失败返回空串，不影响发消息
+    * @Date :2026/11/01 23:26:39
+    * @Param: 无
+    * @return：含 plugin_version / hermes_version 的字典，取不到则为空串
+    """
+    global _VERSION_INFO_CACHE
+    if _VERSION_INFO_CACHE is not None:
+        return dict(_VERSION_INFO_CACHE)
+
+    plugin_version = ""
+    hermes_version = ""
+    try:
+        yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.yaml")
+        with open(yaml_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line.startswith("version:"):
+                    continue
+                plugin_version = line.split(":", 1)[1].strip().strip("\"'")
+                break
+    except Exception:
+        plugin_version = ""
+
+    try:
+        from hermes_cli import __version__ as _hv  # type: ignore
+        hermes_version = str(_hv or "").strip()
+    except Exception:
+        hermes_version = ""
+    if not hermes_version:
+        try:
+            import importlib.metadata as _imd
+            hermes_version = str(_imd.version("hermes-agent") or "").strip()
+        except Exception:
+            hermes_version = ""
+    if not hermes_version:
+        try:
+            version_file = os.path.join(
+                os.path.expanduser("~"),
+                ".hermes",
+                "hermes-agent",
+                "VERSION",
+            )
+            with open(version_file, "r", encoding="utf-8") as fh:
+                hermes_version = fh.read().strip()
+        except Exception:
+            hermes_version = ""
+
+    _VERSION_INFO_CACHE = {
+        "plugin_version": plugin_version or "",
+        "hermes_version": hermes_version or "",
+    }
+    return dict(_VERSION_INFO_CACHE)
+
+
 MAX_MESSAGE_LENGTH = 4000
 DEDUP_MAX_SIZE = 1000
 RECONNECT_MIN_DELAY = float(os.getenv("HARNESS_MATE_RECONNECT_MIN_DELAY", "1"))
@@ -812,6 +873,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
         reasoning = metadata.get("reasoning")
         if reasoning:
             reply_data["reasoning"] = reasoning
+        reply_data.update({k: v for k, v in _collect_version_info().items() if v})
         return reply_data
 
     def _room_fields(self, thread_id: str) -> Dict[str, str]:
@@ -1237,6 +1299,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
                 }
             ],
         }
+        reply_data.update({k: v for k, v in _collect_version_info().items() if v})
         fingerprint = json.dumps(reply_data, ensure_ascii=False, sort_keys=True)
         cache_key = f"{to_ws_session}:{thread_id}:{message_id}:file"
         if self._reply_fingerprints.get(cache_key) == fingerprint:
