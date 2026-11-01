@@ -689,6 +689,8 @@ class HarnessMateAdapter(BasePlatformAdapter):
                 raw_message=raw,
                 message_id=msg_id or None,
             )
+            # turn 开始前按需打补丁：register 时 gateway_agent 通常尚未 import
+            _ensure_tool_trace_patch()
             await self.handle_message(event)
         except Exception:
             logger.exception("harness_mate 处理对端消息失败")
@@ -777,6 +779,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
         * @return：reply.data 字典
         """
         metadata = metadata or {}
+        _ensure_tool_trace_patch()
         reply_data: Dict[str, Any] = {
             "text": content[: self.MAX_MESSAGE_LENGTH],
             "message_id": message_id,
@@ -801,10 +804,13 @@ class HarnessMateAdapter(BasePlatformAdapter):
             try:
                 from . import tool_trace as _tt
                 _steps = _tt.drain()
+                logger.info("harness_mate drain agent_thoughts=%d", len(_steps))
             except Exception:
                 _steps = []
             if _steps:
                 reply_data["agent_thoughts"] = _steps
+                # 私聊链路前端读的是 tool_events（ConversationChatCard 收集 → message_info.tool_events），两个都发，兼容两条路
+                reply_data["tool_events"] = _steps
         reasoning = metadata.get("reasoning")
         if reasoning:
             reply_data["reasoning"] = reasoning
@@ -1582,6 +1588,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
         """
         del reply_to
         metadata = metadata or {}
+        _ensure_tool_trace_patch()
         thread_id, to_ws_session = self._resolve_target(chat_id, metadata)
         msg_id = str(metadata.get("message_id") or uuid.uuid4())
         try:
@@ -1844,47 +1851,121 @@ def _patch_harness_mate_thread_metadata() -> None:
 
     globals()["_HARNESS_MATE_THREAD_METADATA_PATCHED"] = True
 
+
+def _ensure_tool_trace_patch() -> None:
+    """
+    * @Author Leon-liao
+    * @Function: _ensure_tool_trace_patch()
+    * @Description //按需给 GatewayAgent 打工具事件补丁；register 时模块可能尚未加载，故每次发送/回包前再试
+    * @Date :2026/10/30 11:12:00
+    * @Param: 无
+    * @return：无
+    """
+    if globals().get("_HARNESS_MATE_TOOL_TRACE_PATCHED"):
+        return
     try:
         import sys as _sys2
         _gw_agent_mod = _sys2.modules.get("hermes_cli.gateway_agent")
-        _GatewayAgent = getattr(_gw_agent_mod, "GatewayAgent", None) if _gw_agent_mod else None
+        if _gw_agent_mod is None:
+            try:
+                import hermes_cli.gateway_agent as _gw_agent_mod  # noqa: N812
+            except Exception:
+                logger.debug(
+                    "harness_mate 跳过工具事件补丁 (hermes_cli.gateway_agent 未加载)",
+                    exc_info=True,
+                )
+                return
+        _GatewayAgent = getattr(_gw_agent_mod, "GatewayAgent", None)
         if _GatewayAgent is None:
-            logger.debug("harness_mate 跳过工具事件补丁 (hermes_cli.gateway_agent 未加载)")
-        elif not getattr(_GatewayAgent, "_hm_tool_trace_patched", False):
-            from . import tool_trace as _tool_trace
-
-            _orig_on_tool_start = _GatewayAgent._on_tool_start
-            _orig_on_tool_complete = _GatewayAgent._on_tool_complete
-
-            def _hm_on_tool_start(self, payload, stream_callback, starts):
-                try:
-                    name = payload.get("name") or payload.get("tool_name") or "tool"
-                    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-                    call_id = payload.get("tool_id") or payload.get("tool_call_id") or ""
-                    _tool_trace.record_start(str(call_id), str(name), args)
-                except Exception:
-                    logger.debug("harness_mate 记录工具开始失败", exc_info=True)
-                return _orig_on_tool_start(self, payload, stream_callback, starts)
-
-            def _hm_on_tool_complete(self, payload, stream_callback, starts):
-                try:
-                    name = payload.get("name") or payload.get("tool_name") or "tool"
-                    call_id = payload.get("tool_id") or payload.get("tool_call_id") or ""
-                    duration = float(payload.get("duration_s") or 0.0)
-                    _tool_trace.record_complete(
-                        str(call_id), str(name), duration,
-                        bool(payload.get("is_error")), payload.get("result"),
-                    )
-                except Exception:
-                    logger.debug("harness_mate 记录工具完成失败", exc_info=True)
-                return _orig_on_tool_complete(self, payload, stream_callback, starts)
-
-            _GatewayAgent._on_tool_start = _hm_on_tool_start
-            _GatewayAgent._on_tool_complete = _hm_on_tool_complete
-            _GatewayAgent._hm_tool_trace_patched = True
+            logger.debug("harness_mate 跳过工具事件补丁 (GatewayAgent 不存在)")
+            return
+        if getattr(_GatewayAgent, "_hm_tool_trace_patched", False):
             globals()["_HARNESS_MATE_TOOL_TRACE_PATCHED"] = True
+            return
+
+        from . import tool_trace as _tool_trace
+
+        # 关键：事件分发用的是模块级 _HANDLERS 字典（模块加载时已绑定旧函数对象），
+        # 替换 GatewayAgent._on_tool_start 类方法对它无效，必须改字典本身。
+        _handlers = getattr(_gw_agent_mod, "_HANDLERS", None)
+        if not isinstance(_handlers, dict):
+            logger.debug("harness_mate 跳过工具事件补丁 (_HANDLERS 不存在)")
+            return
+        _orig_on_tool_start = _handlers.get("tool.start")
+        _orig_on_tool_complete = _handlers.get("tool.complete")
+        if _orig_on_tool_start is None or _orig_on_tool_complete is None:
+            logger.debug("harness_mate 跳过工具事件补丁 (_HANDLERS 缺少 tool.start/complete)")
+            return
+
+        def _hm_on_tool_start(self, payload, stream_callback, starts):
+            try:
+                name = payload.get("name") or payload.get("tool_name") or "tool"
+                args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+                call_id = payload.get("tool_id") or payload.get("tool_call_id") or ""
+                _tool_trace.record_start(str(call_id), str(name), args)
+                logger.info("harness_mate tool.start id=%s name=%s", call_id, name)
+            except Exception:
+                logger.debug("harness_mate 记录工具开始失败", exc_info=True)
+            return _orig_on_tool_start(self, payload, stream_callback, starts)
+
+        def _hm_on_tool_complete(self, payload, stream_callback, starts):
+            try:
+                name = payload.get("name") or payload.get("tool_name") or "tool"
+                call_id = payload.get("tool_id") or payload.get("tool_call_id") or ""
+                duration = float(payload.get("duration_s") or 0.0)
+                _tool_trace.record_complete(
+                    str(call_id), str(name), duration,
+                    bool(payload.get("is_error")), payload.get("result"),
+                )
+            except Exception:
+                logger.debug("harness_mate 记录工具完成失败", exc_info=True)
+            return _orig_on_tool_complete(self, payload, stream_callback, starts)
+
+        _handlers["tool.start"] = _hm_on_tool_start
+        _handlers["tool.complete"] = _hm_on_tool_complete
+        _GatewayAgent._hm_tool_trace_patched = True
+        globals()["_HARNESS_MATE_TOOL_TRACE_PATCHED"] = True
+        logger.info("harness_mate 已打上 _HANDLERS 工具事件补丁")
     except Exception:
         logger.debug("harness_mate 跳过工具事件补丁", exc_info=True)
+
+
+def _hm_hook_pre_tool_call(tool_name=None, args=None, tool_call_id=None, **kwargs):
+    """官方 pre_tool_call hook：工具开始执行（在 agent 进程内触发，跨进程可靠）"""
+    try:
+        from . import tool_trace as _tt
+        _tt.record_start(str(tool_call_id or ""), str(tool_name or ""), args if isinstance(args, dict) else {})
+        logger.info("harness_mate hook pre_tool_call name=%s", tool_name)
+    except Exception:
+        logger.debug("harness_mate hook pre_tool_call 失败", exc_info=True)
+    return None
+
+
+def _hm_hook_post_tool_call(tool_name=None, args=None, tool_call_id=None, result=None, duration_ms=None, **kwargs):
+    """官方 post_tool_call hook：工具执行结束，补齐耗时与结果摘要"""
+    try:
+        from . import tool_trace as _tt
+        _tt.record_complete(
+            str(tool_call_id or ""),
+            str(tool_name or ""),
+            float(duration_ms or 0) / 1000.0,
+            False,
+            result,
+        )
+        logger.info("harness_mate hook post_tool_call name=%s", tool_name)
+    except Exception:
+        logger.debug("harness_mate hook post_tool_call 失败", exc_info=True)
+    return None
+
+
+def _register_tool_trace_hooks(ctx) -> None:
+    """把工具事件采集挂到 Hermes 官方 hooks 上（不需要改 Hermes 本体）"""
+    try:
+        ctx.register_hook("pre_tool_call", _hm_hook_pre_tool_call)
+        ctx.register_hook("post_tool_call", _hm_hook_post_tool_call)
+        logger.info("harness_mate 已注册 pre/post_tool_call hook")
+    except Exception:
+        logger.warning("harness_mate 注册 tool hook 失败", exc_info=True)
 
 
 def register(ctx) -> None:
@@ -1896,6 +1977,7 @@ def register(ctx) -> None:
     * @Param: ctx: Hermes 插件注册上下文
     """
     _patch_harness_mate_thread_metadata()
+    _register_tool_trace_hooks(ctx)
     ctx.register_platform(
         name="harness_mate",
         label="HarnessMate",

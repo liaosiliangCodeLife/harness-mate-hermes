@@ -3,10 +3,14 @@
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
 
+## 0.6.8 — 2026-10-31 11:40
+- 同步：把平台仓库 `plugin/hermes` 上已生效但没回推本仓库的补丁补齐 —— ①`_ensure_tool_trace_patch()` 三个调用点（turn 开始前、reply 组装前、room 回复前）②done 帧同时上报 `agent_thoughts` 与 `tool_events`（私聊前端读的是 tool_events）③drain 条数日志
+- 发布版本：插件 `0.6.7` → `0.6.8`；本次代码与 `harness-mate-plat/plugin/hermes` 完全一致
+
 ## 0.6.7 — 2026-10-30 09:10
 - 新增：采集 GatewayAgent 工具事件，随 done 帧上报 agent_thoughts（供平台侧 AgentThought 展示执行过程）
 - 发布版本：插件 `0.6.6` → `0.6.7`
-- 文档：INSTALL.md 安装/更新命令改为本独立仓库 `liaosiliangCodeLife/harness-mate-hermes`（原路径指向平台仓库 GitHub 冻结副本，停在 0.6.2）；README 版本号 `0.6.5` → `0.6.7`
+- 文档：安装/更新命令改用独立插件仓库 `liaosiliangCodeLife/harness-mate-hermes`（原路径指向平台仓库 GitHub 冻结副本，停在 0.6.2）；README 版本号同步 `0.6.5` → `0.6.7`
 
 ## 0.6.6 — 2026-10-29 21:16
 - 修复：房间里 agent 发图片/文件失败 —— 房间消息的 `thread_id` 是 `room:<id>`，平台没有对应 conversation，免登录上传接口按 `Conversation.thread_id` 查会话必定 404（`thread_id 对应的会话不存在或不属于该智能体`）。`upload_open_api_file` 新增可选 `room_id` 形参并写入 multipart；`_deliver_local_file` 从 `_room_fields(thread_id)` 取出 room_id 透传，后端据此按「该 agent 是该房间已加入成员」兜底放行
