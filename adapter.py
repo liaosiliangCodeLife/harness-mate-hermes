@@ -81,6 +81,7 @@ WS_GATEWAY_WS_URL = "wss://ws-agent.alltman.com:1443/ws"
 
 # harness_mate 业务层消息类型（放在网关 data 负载内，网关本身不解析）
 TYPE_MESSAGE = "message"
+TYPE_APPROVAL_RESULT = "approval_result"
 TYPE_REPLY = "reply"
 
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 300
@@ -583,6 +584,10 @@ class HarnessMateAdapter(BasePlatformAdapter):
 
         data = _parse_data_field(raw.get("data"))
         msg_type = str(data.get("type") or "").strip()
+        # 平台下行的审批决策：不投给 agent，直接解掉本地等待
+        if msg_type == TYPE_APPROVAL_RESULT:
+            await self._on_approval_result(data)
+            return
         if msg_type == TYPE_MESSAGE:
             await self._on_peer_message(peer_session, data, raw)
             return
@@ -1212,6 +1217,41 @@ class HarnessMateAdapter(BasePlatformAdapter):
         else:
             reason = None if choice == "once" else "用户拒绝"
         await self._finalize_approval(approval_id, choice, reason=reason)
+
+    async def _on_approval_result(self, data: Dict[str, Any]) -> None:
+        """
+        * @Author Leon-liao
+        * @Function: _on_approval_result(data)
+        * @Description //处理平台下行推送的审批决策帧（approval_result），命中本地等待立即解阻塞
+        * @Date :2026/11/01 13:15:00
+        * @Param: data: 网关下发的业务负载，含 approval_result
+        * @return：无
+        """
+        result = data.get("approval_result")
+        if not isinstance(result, dict):
+            result = data
+        approval_id = str(result.get("approval_id") or "").strip()
+        if not approval_id:
+            logger.debug("harness_mate 审批决策帧缺少 approval_id，已忽略")
+            return
+        try:
+            status = int(str(result.get("status")).strip())
+        except (TypeError, ValueError):
+            logger.warning("harness_mate 审批决策帧缺少有效 status: %s", result)
+            return
+        if status == 3:
+            await self._handle_approval_decision(approval_id, "reject-once", timed_out=True)
+            return
+        option_id = str(result.get("option_id") or "").strip()
+        if not option_id:
+            option_id = "allow-once" if status == 1 else "reject-once"
+        logger.info(
+            "harness_mate 收到审批决策推送: id=%s status=%d option=%s",
+            approval_id,
+            status,
+            option_id,
+        )
+        await self._handle_approval_decision(approval_id, option_id)
 
     async def _send_ws(self, to: str, data: Dict[str, Any]) -> bool:
 
