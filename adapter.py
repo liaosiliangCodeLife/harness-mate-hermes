@@ -16,9 +16,7 @@ import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, url2pathname, urlopen
+from urllib.request import url2pathname
 import hashlib
 
 import jwt
@@ -293,11 +291,6 @@ class HarnessMateAdapter(BasePlatformAdapter):
             or os.getenv("HARNESS_MATE_API_BASE", "").strip()
             or DEFAULT_API_BASE
         ).rstrip("/")
-        self.internal_token = (
-            _cfg_get(config, "internal_token", "")
-            or os.getenv("HARNESS_MATE_INTERNAL_TOKEN", "").strip()
-        ).strip()
-        self._approval_poll_tasks: set = set()
 
         extra = getattr(config, "extra", None) or {}
         self._dm_policy = str(
@@ -932,51 +925,6 @@ class HarnessMateAdapter(BasePlatformAdapter):
                     pass
             return float(DEFAULT_APPROVAL_TIMEOUT_SECONDS)
 
-    def _lookup_approval_status(self, client_id: str) -> Optional[int]:
-        """
-        * @Author Leon-liao
-        * @Function: _lookup_approval_status(client_id)
-        * @Description //同步查询平台审批状态；网络错误返回 None
-        * @Date :2026/10/29 21:01:51
-        * @Param: client_id: 插件侧 client_approval_id
-        * @return：status 整数；未就绪或失败返回 None
-        """
-        token = str(self.internal_token or "").strip()
-        if not token:
-            return None
-        query = urlencode({
-            "bot_id": self.bot_id or "",
-            "client_approval_id": client_id,
-        })
-        url = f"{self.api_base}/internal/approvals/lookup?{query}"
-        req = Request(
-            url,
-            headers={"X-Internal-Token": token},
-            method="GET",
-        )
-        try:
-            with urlopen(req, timeout=5) as resp:
-                raw_body = resp.read()
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            logger.debug("harness_mate 审批轮询暂失败: %s", exc)
-            return None
-        try:
-            parsed = json.loads(raw_body.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(parsed, dict) or parsed.get("code") != "success":
-            return None
-        data = parsed.get("data")
-        if not isinstance(data, dict):
-            return None
-        status = data.get("status")
-        if status is None:
-            return None
-        try:
-            return int(status)
-        except (TypeError, ValueError):
-            return None
-
     def _format_approval_fallback_text(self, prompt: ExecApprovalPrompt) -> str:
         """
         * @Author Leon-liao
@@ -995,41 +943,6 @@ class HarnessMateAdapter(BasePlatformAdapter):
         lines.append("")
         lines.append("在平台左侧「授权」页点「允许一次」；也可以在本对话直接回复 /approve 或 /deny")
         return "\n".join(lines)
-
-    async def _poll_approval(self, client_id: str, session_key: str) -> None:
-        """
-        * @Author Leon-liao
-        * @Function: _poll_approval(client_id, session_key)
-        * @Description //后台轮询平台 lookup，拿到决策后调用 resolve_gateway_approval 解阻塞
-        * @Date :2026/10/29 21:01:51
-        * @Param: client_id: 客户端审批 id；session_key: Hermes 审批会话键
-        * @return：无
-        """
-        del session_key
-        timeout_s = self._approval_timeout_seconds()
-        deadline = time.monotonic() + timeout_s
-        token = str(self.internal_token or "").strip()
-        if not token:
-            logger.info(
-                "harness_mate 未配置 HARNESS_MATE_INTERNAL_TOKEN，审批仅靠 /approve 或 #approval"
-            )
-            return
-
-        while time.monotonic() < deadline:
-            if client_id not in self._approval_state:
-                return
-            status = await asyncio.to_thread(self._lookup_approval_status, client_id)
-            if status == 1:
-                await self._finalize_approval(client_id, "once", reason=None)
-                return
-            if status in (2, 3):
-                reason = "平台拒绝" if status == 2 else "平台超时"
-                await self._finalize_approval(client_id, "deny", reason=reason)
-                return
-            await asyncio.sleep(2.0)
-
-        if client_id in self._approval_state:
-            await self._finalize_approval(client_id, "deny", reason="平台超时")
 
     async def _finalize_approval(
         self,
@@ -1180,11 +1093,6 @@ class HarnessMateAdapter(BasePlatformAdapter):
             "peer": to_ws_session,
             "timer": timer,
         }
-
-        if session_key:
-            task = asyncio.create_task(self._poll_approval(client_id, session_key))
-            self._approval_poll_tasks.add(task)
-            task.add_done_callback(self._approval_poll_tasks.discard)
 
         logger.info(
             "harness_mate 已发起风险审批: client_id=%s chat=%s thread=%s peer=%s",
