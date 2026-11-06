@@ -2,6 +2,12 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.12 — 2026-11-06 21:05
+- 修复：群聊里用户发的图片/文件，智能体只收到一串 URL 文本
+  - `_extract_inbound_file` 增加 `kind ∈ {image,file,audio,video}` + `content` 为 http(s) URL 的分支（`extra.name` 作文件名、`kind` 作 media_type）
+  - `_extract_inbound_text` 媒体消息不再把 `content` 当用户话术（返回 `extra.name` 作说明）
+- 发布版本：插件 `0.6.11` → `0.6.12`
+
 ## 0.6.11 — 2026-11-01 23:33
 - 新增：回复帧附带 `plugin_version`（读 plugin.yaml）与 `hermes_version`（hermes_cli.__version__ → 包元数据 → VERSION 文件，三级兜底），模块级缓存，取不到则不带该字段、绝不影响发消息
 - 用途：平台把版本写进 agent_info，智能体详情「扩展信息」展示 Hermes 版本与插件版本

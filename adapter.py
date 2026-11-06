@@ -230,11 +230,23 @@ def _extract_inbound_text(raw: Dict[str, Any], data: Dict[str, Any]) -> str:
     """
     * @Author Leon-liao
     * @Function: _extract_inbound_text(raw, data)
-    * @Description //从网关入站消息中提取用户文本
-    * @Date :2026/06/30 18:30:00
+    * @Description //从网关入站消息中提取用户文本；媒体消息不把 URL 当正文
+    * @Date :2026/11/06 20:45:00
     * @Param: raw: 完整 WS 消息；data: 已解析的 data 字段
     * @return：用户消息文本
     """
+    kind = str(data.get("kind") or "").strip().lower()
+    nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+    if not kind and isinstance(nested, dict):
+        kind = str(nested.get("kind") or "").strip().lower()
+    # 群聊媒体：kind=image/file/audio/video 时 content 是 URL，不能当话术
+    if kind in {"image", "file", "audio", "video"}:
+        extra = data.get("extra") if isinstance(data.get("extra"), dict) else {}
+        if not extra and isinstance(nested, dict):
+            extra = nested.get("extra") if isinstance(nested.get("extra"), dict) else {}
+        name = str((extra or {}).get("name") or "").strip()
+        return name
+
     for candidate in (
         data.get("text"),
         data.get("content"),
@@ -243,6 +255,13 @@ def _extract_inbound_text(raw: Dict[str, Any], data: Dict[str, Any]) -> str:
     ):
         text = str(candidate or "").strip()
         if text:
+            # content 仅为 http(s) URL 且无 kind=text 时，当作媒体占位，避免 URL 当话术
+            if (
+                (text.startswith("http://") or text.startswith("https://"))
+                and kind
+                and kind != "text"
+            ):
+                continue
             return text
     return ""
 
@@ -252,7 +271,7 @@ def _extract_inbound_file(data: Dict[str, Any], nested: Dict[str, Any]) -> Dict[
     * @Author Leon-liao
     * @Function: _extract_inbound_file(data, nested)
     * @Description //从入站 message 中提取已上传文件的 URL、名称和类型
-    * @Date :2026/10/07 20:12:00
+    * @Date :2026/11/06 20:45:00
     * @Param: data: 业务 data；nested: data.data
     * @return：包含 url、file_name、media_type、mime_type 的字典；没有文件时为空字典
     """
@@ -271,6 +290,26 @@ def _extract_inbound_file(data: Dict[str, Any], nested: Dict[str, Any]) -> Dict[
                     candidates.append(item)
                     break
             if candidates:
+                break
+    # 群聊媒体：kind + content(URL)，无 url/files
+    if not candidates:
+        for source in (nested, data):
+            if not isinstance(source, dict):
+                continue
+            kind = str(source.get("kind") or "").strip().lower()
+            content = str(source.get("content") or "").strip()
+            if kind in {"image", "file", "audio", "video"} and (
+                content.startswith("http://") or content.startswith("https://")
+            ):
+                extra = source.get("extra") if isinstance(source.get("extra"), dict) else {}
+                candidates.append(
+                    {
+                        "url": content,
+                        "name": str((extra or {}).get("name") or "").strip(),
+                        "media_type": kind,
+                        "size": (extra or {}).get("size"),
+                    }
+                )
                 break
     if not candidates:
         return {}
