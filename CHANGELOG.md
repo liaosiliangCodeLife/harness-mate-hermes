@@ -2,6 +2,13 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.14 — 2026-11-09 23:20
+- 修复（带附件消息整条报 RuntimeStoreError('invalid_params')）：平台下发的附件是 COS https URL，0.6.12 起把它直接塞进 `MessageEvent.media_urls`，而 Hermes 准入层（`gateway/session_ingress_media.py` 的 `_open_regular`）只接受本机绝对路径的常规文件 —— 校验抛错后整条消息（含正文文字）被丢弃，客户端只看到「抱歉，我遇到了一个错误（RuntimeStoreError）」，图片和文字一起消失
+- 新增 `materialize_inbound_file()`：入站附件先下载落地（image/audio/video/file 分别走 Hermes 的 `cache_*_from_bytes`），`media_urls` 只放本地绝对路径
+- 落地失败（404 / 超限 / SSRF / 网络）静默降级为空串，正文里仍保留原 URL，消息不再整条丢
+- 下载先走环境代理、失败改直连重试一次（本机代理未开时 COS 附件仍能落地）
+- 发布版本：插件 `0.6.13` → `0.6.14`
+
 ## 0.6.13 — 2026-11-09 18:42
 - 修复（群聊回复落到单聊）：`_resolve_target` 增加「最近一次入站线程」兜底与房间归位——回包 metadata 缺 thread_id 或仍带旧私聊 thread 时，若最近入站是房间消息（TTL 600 秒），强制回到 `room:<room_id>` 并打归位日志；`to_ws_session` 解析逻辑不变
 - 发布版本：插件 `0.6.12` → `0.6.13`

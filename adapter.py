@@ -336,6 +336,125 @@ def _extract_inbound_file(data: Dict[str, Any], nested: Dict[str, Any]) -> Dict[
     }
 
 
+def _image_ext(data: bytes, fallback: str) -> str:
+    """按魔数判断图片扩展名；认不出时用 fallback（cache_image_from_bytes 会再校验一次字节）。"""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:6] in {b"GIF87a", b"GIF89a"}:
+        return ".gif"
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:2] == b"BM":
+        return ".bmp"
+    return fallback
+
+
+async def _download_inbound_bytes(url: str, *, media_type: str = "document") -> bytes:
+    """
+    * @Author Leon-liao
+    * @Function: _download_inbound_bytes(url, media_type)
+    * @Description //下载平台附件到内存：SSRF 前置校验 + 重定向校验 + 与 Hermes 一致的大小上限。
+     * 先按环境代理（http_proxy）下载，代理未开/连不上时改直连重试一次 —— COS 是国内服务，
+     * 代理挂了不能连带把附件读图也废掉。
+    * @Date :2026/11/09 23:30:00
+    * @Param: url: 附件地址；media_type: image/audio/video/document（仅用于错误文案与限额口径）
+    * @return：附件字节
+    """
+    try:
+        return await _download_once(url, media_type=media_type, trust_env=True)
+    except Exception as exc:
+        logger.info("harness_mate 附件下载失败（已试代理），改直连重试: url=%s err=%s", url, exc)
+        return await _download_once(url, media_type=media_type, trust_env=False)
+
+
+async def _download_once(url: str, *, media_type: str, trust_env: bool) -> bytes:
+    """单次下载：SSRF 前置校验 + 重定向校验 + 与 Hermes 一致的大小上限。"""
+    from gateway.platforms.base import (
+        get_inbound_media_max_bytes,
+        ssrf_redirect_guard,
+        validate_inbound_media_size,
+    )
+    from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
+
+    if not is_safe_url(url):
+        raise ValueError(f"Blocked unsafe URL (SSRF protection): {url}")
+    limit = get_inbound_media_max_bytes()
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)", "Accept": "*/*"}
+    async with create_ssrf_safe_async_client(
+        timeout=30.0,
+        follow_redirects=True,
+        trust_env=trust_env,
+        event_hooks={"response": [ssrf_redirect_guard]},
+    ) as client:
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            declared = response.headers.get("content-length")
+            if declared:
+                try:
+                    validate_inbound_media_size(int(declared), media_type=media_type, max_bytes=limit)
+                except ValueError:
+                    raise
+                except Exception:
+                    pass
+            chunks: List[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                validate_inbound_media_size(total, media_type=media_type, max_bytes=limit)
+                chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def materialize_inbound_file(inbound_file: Dict[str, str]) -> str:
+    """
+    * @Author Leon-liao
+    * @Function: materialize_inbound_file(inbound_file)
+    * @Description //把入站附件 URL 落地成本机绝对路径。
+     * Hermes 准入层（gateway/session_ingress_media.py 的 _open_regular）只接受「本机绝对路径的常规文件」，
+     * 直接把 http(s) URL 放进 MessageEvent.media_urls 会抛 RuntimeStoreError('invalid_params')，
+     * 并且整条消息（连正文文字）一起被丢弃 —— 所以必须先下载落地再上抛。
+    * @Date :2026/11/09 23:30:00
+    * @Param: inbound_file: _extract_inbound_file 的返回值
+    * @return：本地绝对路径；无法落地时返回空字符串（调用方降级为纯文本，URL 已在正文里）
+    """
+    url = str(inbound_file.get("url") or "").strip()
+    if not url:
+        return ""
+    # 平台若已经推的是本机路径，直接复用
+    if url.startswith("/") and os.path.isfile(url):
+        return url
+    if not url.startswith(("http://", "https://")):
+        return ""
+    media_type = str(inbound_file.get("media_type") or "file").strip().lower()
+    file_name = str(inbound_file.get("file_name") or "").strip()
+    suffix = f".{extension_of(file_name or url)}" if extension_of(file_name or url) else ""
+    try:
+        from gateway.platforms.base import (
+            cache_audio_from_bytes_async,
+            cache_document_from_bytes_async,
+            cache_image_from_bytes_async,
+            cache_video_from_bytes_async,
+        )
+
+        data = await _download_inbound_bytes(url, media_type=media_type)
+        if media_type == "image":
+            return await cache_image_from_bytes_async(data, _image_ext(data, suffix or ".jpg"))
+        if media_type == "audio":
+            return await cache_audio_from_bytes_async(data, suffix or ".ogg")
+        if media_type == "video":
+            return await cache_video_from_bytes_async(data, suffix or ".mp4")
+        return await cache_document_from_bytes_async(
+            data, file_name or f"document{suffix or '.bin'}"
+        )
+    except Exception as exc:
+        logger.warning(
+            "harness_mate 附件落地失败，降级为纯文本: url=%s err=%s", url, exc
+        )
+        return ""
+
+
 class HarnessMateAdapter(BasePlatformAdapter):
     """Go WS 网关 Hermes 端平台适配器。"""
 
@@ -773,13 +892,17 @@ class HarnessMateAdapter(BasePlatformAdapter):
             media_urls: List[str] = []
             media_types: List[str] = []
             if inbound_file:
-                media_urls = [inbound_file["url"]]
-                media_types = [inbound_file["mime_type"]]
-                message_type = {
-                    "image": MessageType.PHOTO,
-                    "video": MessageType.VIDEO,
-                    "audio": MessageType.AUDIO,
-                }.get(inbound_file["media_type"], MessageType.DOCUMENT)
+                # 平台推的是 COS 的 https URL；Hermes 准入层只收「本机绝对路径的常规文件」，
+                # 直接塞 URL 会被判 invalid_params 并连正文一起丢弃 —— 先下载落地再上抛。
+                local_path = await materialize_inbound_file(inbound_file)
+                if local_path:
+                    media_urls = [local_path]
+                    media_types = [inbound_file["mime_type"]]
+                    message_type = {
+                        "image": MessageType.PHOTO,
+                        "video": MessageType.VIDEO,
+                        "audio": MessageType.AUDIO,
+                    }.get(inbound_file["media_type"], MessageType.DOCUMENT)
 
             event = MessageEvent(
                 source=self.build_source(
