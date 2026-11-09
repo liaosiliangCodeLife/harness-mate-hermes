@@ -145,6 +145,7 @@ TYPE_REPLY = "reply"
 
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 300
 DEFAULT_API_BASE = "https://harness.alltman.com/api"
+ROOM_CONTEXT_TTL_SECONDS = 600
 
 
 def _cfg_get(config, key: str, default: str = "") -> str:
@@ -377,6 +378,8 @@ class HarnessMateAdapter(BasePlatformAdapter):
         self._peer_by_device: Dict[str, str] = {}
         self._last_peer_session: str = ""
         self._last_thread_by_chat: Dict[str, str] = {}
+        # 最近一次入站上下文（含房间），供回包线程归位；靠 TTL 与新入站覆盖
+        self._last_inbound_by_chat: Dict[str, Dict[str, Any]] = {}
         # P3：房间会话键 room:<room_id> → {room_id, reply_to}
         self._room_by_thread: Dict[str, Dict[str, str]] = {}
         self._reply_fingerprints: Dict[str, str] = {}
@@ -750,6 +753,12 @@ class HarnessMateAdapter(BasePlatformAdapter):
                     "room_id": room_id,
                     "reply_to": room_reply_to,
                 }
+            self._last_inbound_by_chat[account_id] = {
+                "thread_id": thread_id,
+                "room_id": room_id,
+                "reply_to": room_reply_to,
+                "at": time.monotonic(),
+            }
             device_id = str(
                 data.get("from_device") or data.get("device_id") or peer_session
             ).strip()
@@ -807,9 +816,29 @@ class HarnessMateAdapter(BasePlatformAdapter):
         * @return：(thread_id, to_ws_session) 元组
         """
         metadata = metadata or {}
-        thread_id = str(metadata.get("thread_id") or "").strip()
-        if not thread_id:
-            thread_id = str(metadata.get("session_id") or "").strip()
+        meta_thread = str(metadata.get("thread_id") or metadata.get("session_id") or "").strip()
+        recent = self._last_inbound_by_chat.get(chat_id) or {}
+        recent_thread = ""
+        if recent and (time.monotonic() - float(recent.get("at") or 0)) <= ROOM_CONTEXT_TTL_SECONDS:
+            recent_thread = str(recent.get("thread_id") or "").strip()
+
+        thread_id = meta_thread or recent_thread
+
+        # 房间归位：metadata 给的 thread 不是房间线程，但最近一次入站是房间，且该 thread 不在房间表里
+        if (
+            recent_thread
+            and recent.get("room_id")
+            and thread_id != recent_thread
+            and not self._room_by_thread.get(str(thread_id or ""))
+        ):
+            logger.info(
+                "harness_mate 房间回包归位 chat=%s meta_thread=%s -> %s",
+                chat_id,
+                meta_thread,
+                recent_thread,
+            )
+            thread_id = recent_thread
+
         if not thread_id:
             thread_id = str(self._last_thread_by_chat.get(chat_id) or "").strip()
         if not thread_id:

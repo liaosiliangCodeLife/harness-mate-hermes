@@ -2,6 +2,10 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.13 — 2026-11-09 18:42
+- 修复（群聊回复落到单聊）：`_resolve_target` 增加「最近一次入站线程」兜底与房间归位——回包 metadata 缺 thread_id 或仍带旧私聊 thread 时，若最近入站是房间消息（TTL 600 秒），强制回到 `room:<room_id>` 并打归位日志；`to_ws_session` 解析逻辑不变
+- 发布版本：插件 `0.6.12` → `0.6.13`
+
 ## 0.6.12 — 2026-11-06 21:05
 - 修复：群聊里用户发的图片/文件，智能体只收到一串 URL 文本
   - `_extract_inbound_file` 增加 `kind ∈ {image,file,audio,video}` + `content` 为 http(s) URL 的分支（`extra.name` 作文件名、`kind` 作 media_type）
