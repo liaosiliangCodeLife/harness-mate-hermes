@@ -942,10 +942,20 @@ class HarnessMateAdapter(BasePlatformAdapter):
         meta_thread = str(metadata.get("thread_id") or metadata.get("session_id") or "").strip()
         recent = self._last_inbound_by_chat.get(chat_id) or {}
         recent_thread = ""
-        if recent and (time.monotonic() - float(recent.get("at") or 0)) <= ROOM_CONTEXT_TTL_SECONDS:
+        # metadata 已有明确 thread 时，绝不拿「最近一次入站」覆盖，避免 DM 与群互相串台
+        if (
+            not meta_thread
+            and recent
+            and (time.monotonic() - float(recent.get("at") or 0)) <= ROOM_CONTEXT_TTL_SECONDS
+        ):
             recent_thread = str(recent.get("thread_id") or "").strip()
 
-        thread_id = meta_thread or recent_thread
+        thread_id = meta_thread
+        if not thread_id:
+            # 私聊兜底优先用最近的非房间线程（该字典只在非 room 入站时写入）
+            thread_id = str(self._last_thread_by_chat.get(chat_id) or "").strip()
+        if not thread_id:
+            thread_id = recent_thread
 
         # 房间归位：metadata 给的 thread 不是房间线程，但最近一次入站是房间，且该 thread 不在房间表里
         if (
@@ -962,21 +972,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
             )
             thread_id = recent_thread
 
-        if not thread_id:
-            thread_id = str(self._last_thread_by_chat.get(chat_id) or "").strip()
-        if not thread_id:
-            for (acct, tid), _peer in self._reply_targets.items():
-                candidate = str(tid or "").strip()
-                if acct == chat_id and candidate:
-                    thread_id = candidate
-                    break
-
         to_ws_session = str(self._reply_targets.get((chat_id, thread_id), "")).strip()
-        if not to_ws_session:
-            for (acct, _tid), peer in self._reply_targets.items():
-                if acct == chat_id and peer:
-                    to_ws_session = str(peer).strip()
-                    break
         if not to_ws_session:
             to_ws_session = str(self._last_peer_session or "").strip()
         if not to_ws_session:
@@ -989,6 +985,10 @@ class HarnessMateAdapter(BasePlatformAdapter):
             to_ws_session = str(
                 metadata.get("to_ws_session") or metadata.get("to") or ""
             ).strip()
+        logger.debug(
+            "harness_mate 解析回包目标 chat=%s meta_thread=%s recent_thread=%s -> thread=%s ws=%s",
+            chat_id, meta_thread, recent_thread, thread_id, to_ws_session,
+        )
         return thread_id, to_ws_session
 
     def _typing_key(self, to_ws_session: str, thread_id: str) -> Tuple[str, str]:
