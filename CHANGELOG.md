@@ -2,6 +2,12 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.16 — 2026-11-13 00:22
+- 新增：工具执行过程中实时推送进度帧——`post_tool_call` hook 每完成一步就 `_push_tool_progress()` 发一帧 `status=thinking`（`message_id=prog-<thread_id>`，带 `agent_thoughts` + `tool_events` 全量快照，`done=false`），客户端据此在正文尚未出现时先渲染执行过程
+- 修复：`tool_trace._steps` 由模块级全局 list 改为按 `thread_id` 分桶的 dict，`record_start/record_complete` 记住步骤所属线程，`drain(thread_id)` 只取本线程——同进程多会话并发时不再互相抢步、串步
+- 新增 `tool_trace.current_thread() / set_thread() / snapshot() / _bucket()`；入站解析时登记当前线程，回包 `_build_reply_data` 透传 `thread_id` 给 `drain()`
+- 修复：`record_complete()` 返回构造出的 step，供实时推送复用
+- 发布版本：插件 `0.6.15` → `0.6.16`
 ## 0.6.14 — 2026-11-09 23:20
 - 修复（带附件消息整条报 RuntimeStoreError('invalid_params')）：平台下发的附件是 COS https URL，0.6.12 起把它直接塞进 `MessageEvent.media_urls`，而 Hermes 准入层（`gateway/session_ingress_media.py` 的 `_open_regular`）只接受本机绝对路径的常规文件 —— 校验抛错后整条消息（含正文文字）被丢弃，客户端只看到「抱歉，我遇到了一个错误（RuntimeStoreError）」，图片和文字一起消失
 - 新增 `materialize_inbound_file()`：入站附件先下载落地（image/audio/video/file 分别走 Hermes 的 `cache_*_from_bytes`），`media_urls` 只放本地绝对路径

@@ -455,6 +455,66 @@ async def materialize_inbound_file(inbound_file: Dict[str, str]) -> str:
         return ""
 
 
+# 实时进度推送用：当前 adapter 实例与其事件循环（在入站处理时登记）
+_HM_INSTANCE: Any = None
+_HM_LOOP: Any = None
+
+
+def _push_tool_progress(step: Dict[str, Any]) -> None:
+    """工具执行完一步就推一帧状态帧（带当前线程的步骤快照），供客户端实时显示执行过程"""
+    inst = _HM_INSTANCE
+    loop = _HM_LOOP
+    if not inst or loop is None or not isinstance(step, dict):
+        logger.info("hm progress skip: inst=%s loop=%s step=%s", bool(inst), loop is not None, isinstance(step, dict))
+        return
+    try:
+        from . import tool_trace as _tt
+        tid = _tt.current_thread()
+        if not tid:
+            logger.info("hm progress skip: empty thread")
+            return
+        target = None
+        for (acct, t), peer in list(getattr(inst, "_reply_targets", {}).items()):
+            if str(t) == tid and peer:
+                target = (str(acct), str(t), str(peer))
+                break
+        if not target:
+            logger.info("hm progress skip: no target tid=%s keys=%s", tid, list(getattr(inst, "_reply_targets", {}).keys())[:5])
+            return
+        acct, thread_id, peer = target
+        snap = _tt.snapshot(thread_id)
+        if not snap:
+            logger.info("hm progress skip: empty snapshot tid=%s", thread_id)
+            return
+        data = {
+            "text": "",
+            "message_id": "prog-" + thread_id,
+            "status": "thinking",
+            "agent_thoughts": snap,
+            "tool_events": snap,
+            "done": False,
+        }
+        payload: Dict[str, Any] = {
+            "type": TYPE_REPLY,
+            "account_id": acct,
+            "thread_id": thread_id,
+            "bot_id": inst.bot_id,
+            "data": data,
+        }
+        try:
+            payload.update(inst._room_fields(thread_id))
+        except Exception:
+            pass
+
+        async def _fire() -> None:
+            await inst._send_ws(peer, payload)
+
+        asyncio.run_coroutine_threadsafe(_fire(), loop)
+        logger.info("hm progress sent: tid=%s steps=%d peer=%s", thread_id, len(snap), peer)
+    except Exception:
+        logger.warning("harness_mate 推送工具进度失败", exc_info=True)
+
+
 class HarnessMateAdapter(BasePlatformAdapter):
     """Go WS 网关 Hermes 端平台适配器。"""
 
@@ -821,6 +881,12 @@ class HarnessMateAdapter(BasePlatformAdapter):
         * @Date :2026/07/02 10:00:00
         * @Param: peer_session: 对端 ws_session_id；data: 业务 data；raw: 完整网关消息
         """
+        global _HM_INSTANCE, _HM_LOOP
+        _HM_INSTANCE = self
+        try:
+            _HM_LOOP = asyncio.get_running_loop()
+        except Exception:
+            pass
         try:
             nested = _parse_data_field(data.get("data"))
             text = _extract_inbound_text(data, nested)
@@ -872,6 +938,11 @@ class HarnessMateAdapter(BasePlatformAdapter):
                     "room_id": room_id,
                     "reply_to": room_reply_to,
                 }
+            try:
+                from . import tool_trace as _tt_in
+                _tt_in.set_thread(thread_id)
+            except Exception:
+                pass
             self._last_inbound_by_chat[account_id] = {
                 "thread_id": thread_id,
                 "room_id": room_id,
@@ -1019,6 +1090,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
         *,
         finalize: bool = False,
+        thread_id: str = "",
     ) -> Dict[str, Any]:
         """
         * @Author Leon-liao
@@ -1053,7 +1125,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
             reply_data["done"] = True
             try:
                 from . import tool_trace as _tt
-                _steps = _tt.drain()
+                _steps = _tt.drain(thread_id)
                 logger.info("harness_mate drain agent_thoughts=%d", len(_steps))
             except Exception:
                 _steps = []
@@ -1119,6 +1191,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
             message_id,
             metadata,
             finalize=finalize,
+            thread_id=thread_id,
         )
         fingerprint = json.dumps(reply_data, ensure_ascii=False, sort_keys=True)
         cache_key = f"{to_ws_session}:{thread_id}:{message_id}"
@@ -2144,16 +2217,20 @@ def _hm_hook_pre_tool_call(tool_name=None, args=None, tool_call_id=None, **kwarg
 
 
 def _hm_hook_post_tool_call(tool_name=None, args=None, tool_call_id=None, result=None, duration_ms=None, **kwargs):
-    """官方 post_tool_call hook：工具执行结束，补齐耗时与结果摘要"""
+    """官方 post_tool_call hook：工具执行结束，补齐耗时与结果摘要，并实时推一帧进度"""
     try:
         from . import tool_trace as _tt
-        _tt.record_complete(
+        step = _tt.record_complete(
             str(tool_call_id or ""),
             str(tool_name or ""),
             float(duration_ms or 0) / 1000.0,
             False,
             result,
         )
+        try:
+            _push_tool_progress(step)  # type: ignore[arg-type]
+        except Exception:
+            logger.debug("harness_mate 进度帧推送异常", exc_info=True)
         logger.info("harness_mate hook post_tool_call name=%s", tool_name)
     except Exception:
         logger.debug("harness_mate hook post_tool_call 失败", exc_info=True)

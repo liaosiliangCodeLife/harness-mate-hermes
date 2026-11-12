@@ -22,7 +22,32 @@ MAX_TOOL_INPUT = 500
 
 _lock = threading.Lock()
 _inflight: dict[str, dict] = {}
-_steps: list[dict] = []
+_steps: dict[str, list[dict]] = {}
+_current_thread = ""
+
+
+def current_thread() -> str:
+    """当前处理的会话线程"""
+    return str(_current_thread or "")
+
+
+def snapshot(thread_id: str = "") -> list:
+    """取指定线程的步骤副本（不清空，供实时进度帧使用）"""
+    key = str(thread_id or _current_thread or "")
+    with _lock:
+        return list(_steps.get(key, []))
+
+
+def set_thread(thread_id: str) -> None:
+    """标记当前处理的会话线程，工具步骤按线程分桶，避免多轮并发互相抢走"""
+    global _current_thread
+    _current_thread = str(thread_id or "")
+
+
+def _bucket(thread_id: str = "") -> list:
+    """取指定线程（缺省当前线程）的步骤桶"""
+    key = str(thread_id or _current_thread or "")
+    return _steps.setdefault(key, [])
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -100,6 +125,7 @@ def record_start(call_id: str, name: str, args: dict | None) -> None:
     with _lock:
         _inflight[str(call_id or "")] = {
             "name": name or "tool",
+            "thread": _current_thread,
             "args": args if isinstance(args, dict) else {},
             "started": time.time(),
         }
@@ -126,7 +152,9 @@ def record_complete(
     with _lock:
         started_meta = _inflight.pop(key, None)
         args = {}
+        step_thread = _current_thread
         if isinstance(started_meta, dict):
+            step_thread = str(started_meta.get("thread") or step_thread)
             maybe_args = started_meta.get("args")
             if isinstance(maybe_args, dict):
                 args = maybe_args
@@ -142,13 +170,15 @@ def record_complete(
             "latency": round(float(duration or 0), 2),
             "created_at": int(time.time()),
         }
-        _steps.append(step)
-        overflow = len(_steps) - MAX_STEPS
+        bucket = _bucket(step_thread)
+        bucket.append(step)
+        overflow = len(bucket) - MAX_STEPS
         if overflow > 0:
-            del _steps[:overflow]
+            del bucket[:overflow]
+        return step
 
 
-def drain() -> list[dict]:
+def drain(thread_id: str = "") -> list[dict]:
     """
     * @Author Leon-liao
     * @Function:
@@ -161,12 +191,18 @@ def drain() -> list[dict]:
     """
     now = int(time.time())
     cutoff = now - TTL_SECONDS
+    key = str(thread_id or _current_thread or "")
     with _lock:
         kept = [
-            item for item in _steps
+            item for item in _steps.pop(key, [])
             if int(item.get("created_at") or 0) >= cutoff
         ]
-        _steps.clear()
+        # 兜底：hook 没拿到线程时步骤落在空桶，本线程桶为空时取一次空桶
+        if not kept and key:
+            kept = [
+                item for item in _steps.pop("", [])
+                if int(item.get("created_at") or 0) >= cutoff
+            ]
         return kept
 
 
