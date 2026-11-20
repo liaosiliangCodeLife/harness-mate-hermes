@@ -486,9 +486,14 @@ def _push_tool_progress(step: Dict[str, Any]) -> None:
         if not snap:
             logger.info("hm progress skip: empty snapshot tid=%s", thread_id)
             return
+        # 归属用本轮回复的消息 ID；取不到才回退老的 prog- 前缀（兼容未升级路径）
+        try:
+            turn_id = inst._turn_message_id(thread_id)
+        except Exception:
+            turn_id = ""
         data = {
             "text": "",
-            "message_id": "prog-" + thread_id,
+            "message_id": turn_id or ("prog-" + thread_id),
             "status": "thinking",
             "agent_thoughts": snap,
             "tool_events": snap,
@@ -562,6 +567,8 @@ class HarnessMateAdapter(BasePlatformAdapter):
         # P3：房间会话键 room:<room_id> → {room_id, reply_to}
         self._room_by_thread: Dict[str, Dict[str, str]] = {}
         self._reply_fingerprints: Dict[str, str] = {}
+        # 本轮回复的消息 ID：进度帧 / 正文帧 / done 帧共用，保证服务端按 message_id 归并成一条
+        self._turn_msg_id: Dict[str, str] = {}
         self._typing_last_sent: Dict[Tuple[str, str], float] = {}
         self._typing_lock = asyncio.Lock()
         # 审批：approval_id → {session_key, chat_id, thread_id, peer, timer}
@@ -943,6 +950,8 @@ class HarnessMateAdapter(BasePlatformAdapter):
                 _tt_in.set_thread(thread_id)
             except Exception:
                 pass
+            # 新一轮开始：先生成本轮消息 ID，后续进度帧/正文帧/done 帧共用它
+            self._turn_message_id(thread_id, renew=True)
             self._last_inbound_by_chat[account_id] = {
                 "thread_id": thread_id,
                 "room_id": room_id,
@@ -995,6 +1004,26 @@ class HarnessMateAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         except Exception:
             logger.exception("harness_mate 处理对端消息失败")
+
+    def _turn_message_id(self, thread_id: str, renew: bool = False) -> str:
+        """
+        * @Author Leon-liao
+        * @Function: _turn_message_id(thread_id, renew)
+        * @Description //取本轮回复的消息 ID。一轮 = 一次用户请求：收到入站消息时 renew 生成，之后进度帧/正文帧/done 帧全部复用它
+        * @Date :2026/11/20 23:30:00
+        * @Param: thread_id: 会话线程；renew: 为新的一轮重新生成
+        * @return：消息 ID；thread_id 为空时返回空串
+        """
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return ""
+        if renew or not self._turn_msg_id.get(tid):
+            self._turn_msg_id[tid] = str(uuid.uuid4())
+        return self._turn_msg_id[tid]
+
+    def _clear_turn_message_id(self, thread_id: str) -> None:
+        """本轮结束（done 已发）后清掉映射，下一轮重新生成，避免跨轮复用同一个消息 ID"""
+        self._turn_msg_id.pop(str(thread_id or "").strip(), None)
 
     def _resolve_target(
         self,
@@ -1218,6 +1247,9 @@ class HarnessMateAdapter(BasePlatformAdapter):
         ok = await self._send_ws(to_ws_session, business_payload)
         if not ok:
             return SendResult(success=False, error="ws send failed")
+        # done 已送达：清掉本轮消息 ID，下一轮入站重新生成（避免跨轮复用）
+        if reply_data.get("done"):
+            self._clear_turn_message_id(thread_id)
         self._reset_typing_throttle(to_ws_session, thread_id)
         logger.debug(
             "harness_mate 已发送 reply: peer=%s thread=%s msg=%s delta=%s done=%s len=%d",
@@ -1865,7 +1897,12 @@ class HarnessMateAdapter(BasePlatformAdapter):
         metadata = metadata or {}
         _ensure_tool_trace_patch()
         thread_id, to_ws_session = self._resolve_target(chat_id, metadata)
-        msg_id = str(metadata.get("message_id") or uuid.uuid4())
+        # 正文帧复用本轮消息 ID：与进度帧、done 帧归并成同一条消息
+        msg_id = str(
+            metadata.get("message_id")
+            or self._turn_message_id(thread_id)
+            or uuid.uuid4()
+        )
         try:
             return await self._send_reply(
                 chat_id,
