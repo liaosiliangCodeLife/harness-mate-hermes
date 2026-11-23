@@ -206,6 +206,21 @@ def drain(thread_id: str = "") -> list[dict]:
         return kept
 
 
+def reset(thread_id: str = "") -> None:
+    """
+    * @Function: reset(thread_id)
+    * @Description //新一轮开始：丢弃上一轮残留步骤（含空桶），避免跨轮串步
+    * @Param: thread_id
+    * @return：无
+    """
+    key = str(thread_id or _current_thread or "").strip()
+    with _lock:
+        if key:
+            _steps.pop(key, None)
+        # 空桶是 hook 拿不到线程时的兜底，跨轮残留同样要清
+        _steps.pop("", None)
+
+
 def clear() -> None:
     """
     * @Author Leon-liao

@@ -1018,6 +1018,12 @@ class HarnessMateAdapter(BasePlatformAdapter):
             return ""
         if renew or not self._turn_msg_id.get(tid):
             self._turn_msg_id[tid] = str(uuid.uuid4())
+            # 新的一轮开始：清掉上一轮未取走的工具步骤，避免跨轮串步
+            try:
+                from . import tool_trace as _tt
+                _tt.reset(tid)
+            except Exception:
+                pass
         return self._turn_msg_id[tid]
 
     def _clear_turn_message_id(self, thread_id: str) -> None:
