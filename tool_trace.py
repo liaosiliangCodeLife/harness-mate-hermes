@@ -24,6 +24,7 @@ _lock = threading.Lock()
 _inflight: dict[str, dict] = {}
 _steps: dict[str, list[dict]] = {}
 _current_thread = ""
+_current_turn = ""
 
 
 def current_thread() -> str:
@@ -31,11 +32,13 @@ def current_thread() -> str:
     return str(_current_thread or "")
 
 
-def snapshot(thread_id: str = "") -> list:
-    """取指定线程的步骤副本（不清空，供实时进度帧使用）"""
-    key = str(thread_id or _current_thread or "")
+def snapshot(thread_id: str = "", turn_id: str = "") -> list:
+    """取指定线程+轮次的步骤副本（不清空，供实时进度帧使用）"""
+    key = _bucket_key(thread_id, turn_id)
     with _lock:
-        return list(_steps.get(key, []))
+        if key in _steps:
+            return list(_steps[key])
+        return []
 
 
 def set_thread(thread_id: str) -> None:
@@ -44,10 +47,22 @@ def set_thread(thread_id: str) -> None:
     _current_thread = str(thread_id or "")
 
 
-def _bucket(thread_id: str = "") -> list:
-    """取指定线程（缺省当前线程）的步骤桶"""
-    key = str(thread_id or _current_thread or "")
-    return _steps.setdefault(key, [])
+def set_turn(turn_id: str) -> None:
+    """标记当前轮次（message_id），步骤按 thread|turn 双键隔离，跨轮不串"""
+    global _current_turn
+    _current_turn = str(turn_id or "")
+
+
+def _bucket_key(thread_id: str = "", turn_id: str = "") -> str:
+    """桶键：thread|turn，双键隔离，跨轮/跨会话都不串"""
+    t = str(thread_id or _current_thread or "").strip()
+    u = str(turn_id or _current_turn or "").strip()
+    return f"{t}|{u}"
+
+
+def _bucket(thread_id: str = "", turn_id: str = "") -> list:
+    """取指定线程+轮次（缺省当前）的步骤桶"""
+    return _steps.setdefault(_bucket_key(thread_id, turn_id), [])
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -126,6 +141,7 @@ def record_start(call_id: str, name: str, args: dict | None) -> None:
         _inflight[str(call_id or "")] = {
             "name": name or "tool",
             "thread": _current_thread,
+            "turn": _current_turn,
             "args": args if isinstance(args, dict) else {},
             "started": time.time(),
         }
@@ -153,8 +169,10 @@ def record_complete(
         started_meta = _inflight.pop(key, None)
         args = {}
         step_thread = _current_thread
+        step_turn = _current_turn
         if isinstance(started_meta, dict):
             step_thread = str(started_meta.get("thread") or step_thread)
+            step_turn = str(started_meta.get("turn") or step_turn)
             maybe_args = started_meta.get("args")
             if isinstance(maybe_args, dict):
                 args = maybe_args
@@ -170,7 +188,7 @@ def record_complete(
             "latency": round(float(duration or 0), 2),
             "created_at": int(time.time()),
         }
-        bucket = _bucket(step_thread)
+        bucket = _bucket(step_thread, step_turn)
         bucket.append(step)
         overflow = len(bucket) - MAX_STEPS
         if overflow > 0:
@@ -178,7 +196,7 @@ def record_complete(
         return step
 
 
-def drain(thread_id: str = "") -> list[dict]:
+def drain(thread_id: str = "", turn_id: str = "") -> list[dict]:
     """
     * @Author Leon-liao
     * @Function:
@@ -191,18 +209,18 @@ def drain(thread_id: str = "") -> list[dict]:
     """
     now = int(time.time())
     cutoff = now - TTL_SECONDS
-    key = str(thread_id or _current_thread or "")
+    key = _bucket_key(thread_id, turn_id)
     with _lock:
         kept = [
             item for item in _steps.pop(key, [])
             if int(item.get("created_at") or 0) >= cutoff
         ]
-        # 兜底：hook 没拿到线程时步骤落在空桶，本线程桶为空时取一次空桶
-        if not kept and key:
-            kept = [
-                item for item in _steps.pop("", [])
-                if int(item.get("created_at") or 0) >= cutoff
-            ]
+        # 本轮结束：顺手清掉该线程其它旧轮次，避免残留到下一轮
+        t = str(thread_id or _current_thread or "").strip()
+        if t:
+            prefix = f"{t}|"
+            for k in [k for k in _steps.keys() if k.startswith(prefix) and k != key]:
+                _steps.pop(k, None)
         return kept
 
 
@@ -213,12 +231,15 @@ def reset(thread_id: str = "") -> None:
     * @Param: thread_id
     * @return：无
     """
-    key = str(thread_id or _current_thread or "").strip()
+    t = str(thread_id or _current_thread or "").strip()
     with _lock:
-        if key:
-            _steps.pop(key, None)
+        if t:
+            prefix = f"{t}|"
+            for k in [k for k in _steps.keys() if k.startswith(prefix)]:
+                _steps.pop(k, None)
         # 空桶是 hook 拿不到线程时的兜底，跨轮残留同样要清
         _steps.pop("", None)
+        _steps.pop("|", None)
 
 
 def clear() -> None:

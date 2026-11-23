@@ -482,7 +482,8 @@ def _push_tool_progress(step: Dict[str, Any]) -> None:
             logger.info("hm progress skip: no target tid=%s keys=%s", tid, list(getattr(inst, "_reply_targets", {}).keys())[:5])
             return
         acct, thread_id, peer = target
-        snap = _tt.snapshot(thread_id)
+        turn_id = str(inst._turn_msg_id.get(tid) or "")
+        snap = _tt.snapshot(thread_id, turn_id)
         if not snap:
             logger.info("hm progress skip: empty snapshot tid=%s", thread_id)
             return
@@ -1017,11 +1018,13 @@ class HarnessMateAdapter(BasePlatformAdapter):
         if not tid:
             return ""
         if renew or not self._turn_msg_id.get(tid):
-            self._turn_msg_id[tid] = str(uuid.uuid4())
-            # 新的一轮开始：清掉上一轮未取走的工具步骤，避免跨轮串步
+            turn = str(uuid.uuid4())
+            self._turn_msg_id[tid] = turn
+            # 新的一轮：清掉该线程遗留步骤并切到本轮桶，避免跨轮串步
             try:
                 from . import tool_trace as _tt
                 _tt.reset(tid)
+                _tt.set_turn(turn)
             except Exception:
                 pass
         return self._turn_msg_id[tid]
@@ -1214,7 +1217,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
             reply_data["done"] = True
             try:
                 from . import tool_trace as _tt
-                _steps = _tt.drain(thread_id)
+                _steps = _tt.drain(thread_id, message_id)
                 logger.info("harness_mate drain agent_thoughts=%d", len(_steps))
             except Exception:
                 _steps = []
