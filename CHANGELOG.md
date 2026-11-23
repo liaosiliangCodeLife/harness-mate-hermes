@@ -2,6 +2,16 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.17 — 2026-11-22 21:17
+- 修复（多会话并发消息串台）：删除 `_last_thread_by_chat` 账号级「最近私聊线程」兜底——同进程多 DM 并发时不再把 A 会话回复投进 B
+- 调整：房间归位仅在 `metadata` 完全未给 `thread_id` 时启用（`not meta_thread`）；有明确线程绝不被「最近入站房间」覆盖
+- 调整：`thread_id` 解析不出时 `_send_reply` 拒绝投递（`error=thread_id not resolved`）并 warning，宁丢不串
+- 新增：`_dump_undeliverable()` 将无法归属的回复落盘 `~/.hermes/cache/harness_mate_undeliverable.jsonl`（时间 / chat_id / metadata），供事后补发
+- 核查：`tool_trace._steps` 已按 thread 分桶，`drain(thread_id)` 调用点均传入 thread_id
+- 优化：正文流式帧改增量（`delta=true` 只发新增后缀），done / 一次性消息 / 群聊仍发全量，客户端按 `prev + text` 拼接，长回复不再整段重传
+- 修复：工具步骤进度帧改全量快照替换，避免客户端重复追加同一步
+- 发布版本：插件 `0.6.16` → `0.6.17`
+
 ## 0.6.16 — 2026-11-13 00:22
 - 新增：工具执行过程中实时推送进度帧——`post_tool_call` hook 每完成一步就 `_push_tool_progress()` 发一帧 `status=thinking`（`message_id=prog-<thread_id>`，带 `agent_thoughts` + `tool_events` 全量快照，`done=false`），客户端据此在正文尚未出现时先渲染执行过程
 - 修复：`tool_trace._steps` 由模块级全局 list 改为按 `thread_id` 分桶的 dict，`record_start/record_complete` 记住步骤所属线程，`drain(thread_id)` 只取本线程——同进程多会话并发时不再互相抢步、串步

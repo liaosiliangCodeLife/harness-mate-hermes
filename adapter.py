@@ -561,12 +561,13 @@ class HarnessMateAdapter(BasePlatformAdapter):
         self._reply_targets: Dict[Tuple[str, str], str] = {}
         self._peer_by_device: Dict[str, str] = {}
         self._last_peer_session: str = ""
-        self._last_thread_by_chat: Dict[str, str] = {}
-        # 最近一次入站上下文（含房间），供回包线程归位；靠 TTL 与新入站覆盖
+        # 最近一次入站上下文（含房间），仅在 metadata 缺 thread 时作房间归位；靠 TTL 与新入站覆盖
         self._last_inbound_by_chat: Dict[str, Dict[str, Any]] = {}
         # P3：房间会话键 room:<room_id> → {room_id, reply_to}
         self._room_by_thread: Dict[str, Dict[str, str]] = {}
         self._reply_fingerprints: Dict[str, str] = {}
+        # 单聊流式已发送全文前缀（thread:message_id → 累计正文），用于算增量后缀
+        self._stream_sent: Dict[str, str] = {}
         # 本轮回复的消息 ID：进度帧 / 正文帧 / done 帧共用，保证服务端按 message_id 归并成一条
         self._turn_msg_id: Dict[str, str] = {}
         self._typing_last_sent: Dict[Tuple[str, str], float] = {}
@@ -962,9 +963,6 @@ class HarnessMateAdapter(BasePlatformAdapter):
                 data.get("from_device") or data.get("device_id") or peer_session
             ).strip()
             self._reply_targets[(account_id, thread_id)] = peer_session
-            # 房间会话不写「最近线程」，否则会把私聊的兜底线程顶掉
-            if account_id and thread_id and not room_id:
-                self._last_thread_by_chat[account_id] = thread_id
             self._peer_by_device[device_id] = peer_session
             self._last_peer_session = peer_session
 
@@ -1025,6 +1023,37 @@ class HarnessMateAdapter(BasePlatformAdapter):
         """本轮结束（done 已发）后清掉映射，下一轮重新生成，避免跨轮复用同一个消息 ID"""
         self._turn_msg_id.pop(str(thread_id or "").strip(), None)
 
+    def _dump_undeliverable(
+        self,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]],
+        *,
+        reason: str,
+    ) -> None:
+        """
+        * @Author Leon-liao
+        * @Function: _dump_undeliverable(chat_id, metadata, reason)
+        * @Description //归属不明的回复落盘，供事后补发；绝不猜线程投递
+        * @Date :2026/11/22 21:17:00
+        * @Param: chat_id / metadata / reason
+        * @return：无
+        """
+        try:
+            path = os.path.expanduser(
+                "~/.hermes/cache/harness_mate_undeliverable.jsonl"
+            )
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            record = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "chat_id": str(chat_id or ""),
+                "reason": str(reason or ""),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            logger.exception("harness_mate 落盘 undeliverable 失败")
+
     def _resolve_target(
         self,
         chat_id: str,
@@ -1033,36 +1062,30 @@ class HarnessMateAdapter(BasePlatformAdapter):
         """
         * @Author Leon-liao
         * @Function: _resolve_target(chat_id, metadata)
-        * @Description //解析 thread_id 与目标 ws_session_id。thread_id 依次从 metadata、最近会话和已登记回复目标兜底
+        * @Description //解析 thread_id 与目标 ws_session_id。thread 只信 metadata；无 thread 时仅允许「最近入站房间」归位，绝不跨会话猜
         * @Date :2026/07/02 11:30:00
         * @Param: chat_id: 账号 ID；metadata: 发送元数据
         * @return：(thread_id, to_ws_session) 元组
         """
         metadata = metadata or {}
-        meta_thread = str(metadata.get("thread_id") or metadata.get("session_id") or "").strip()
+        meta_thread = str(
+            metadata.get("thread_id") or metadata.get("session_id") or ""
+        ).strip()
         recent = self._last_inbound_by_chat.get(chat_id) or {}
         recent_thread = ""
-        # metadata 已有明确 thread 时，绝不拿「最近一次入站」覆盖，避免 DM 与群互相串台
         if (
-            not meta_thread
-            and recent
-            and (time.monotonic() - float(recent.get("at") or 0)) <= ROOM_CONTEXT_TTL_SECONDS
+            recent
+            and (time.monotonic() - float(recent.get("at") or 0))
+            <= ROOM_CONTEXT_TTL_SECONDS
         ):
             recent_thread = str(recent.get("thread_id") or "").strip()
 
         thread_id = meta_thread
-        if not thread_id:
-            # 私聊兜底优先用最近的非房间线程（该字典只在非 room 入站时写入）
-            thread_id = str(self._last_thread_by_chat.get(chat_id) or "").strip()
-        if not thread_id:
-            thread_id = recent_thread
-
-        # 房间归位：metadata 给的 thread 不是房间线程，但最近一次入站是房间，且该 thread 不在房间表里
+        # 房间归位：只在 metadata 完全没给线程时，才用「最近入站房间」兜底
         if (
-            recent_thread
+            not meta_thread
+            and recent_thread
             and recent.get("room_id")
-            and thread_id != recent_thread
-            and not self._room_by_thread.get(str(thread_id or ""))
         ):
             logger.info(
                 "harness_mate 房间回包归位 chat=%s meta_thread=%s -> %s",
@@ -1112,6 +1135,29 @@ class HarnessMateAdapter(BasePlatformAdapter):
         """
         self._typing_last_sent.pop(self._typing_key(to_ws_session, thread_id), None)
 
+    def _delta_payload(
+        self,
+        thread_id: str,
+        message_id: str,
+        content: str,
+        *,
+        streaming: bool,
+        finalize: bool,
+        is_room: bool,
+    ) -> tuple[str, bool]:
+        """流式帧只发新增后缀；done / 一次性消息 / 群聊发全量。返回 (text, delta)。"""
+        text = content or ""
+        key = f"{thread_id}:{message_id}"
+        if finalize or not streaming or is_room:
+            self._stream_sent.pop(key, None)
+            return text, False
+        prev = self._stream_sent.get(key, "")
+        if prev and text.startswith(prev):
+            self._stream_sent[key] = text
+            return text[len(prev):], True
+        self._stream_sent[key] = text
+        return text, False
+
     def _build_reply_data(
         self,
         content: str,
@@ -1131,10 +1177,6 @@ class HarnessMateAdapter(BasePlatformAdapter):
         """
         metadata = metadata or {}
         _ensure_tool_trace_patch()
-        reply_data: Dict[str, Any] = {
-            "text": content[: self.MAX_MESSAGE_LENGTH],
-            "message_id": message_id,
-        }
         is_streaming = bool(
             metadata.get("delta")
             or metadata.get("expect_edits")
@@ -1146,9 +1188,20 @@ class HarnessMateAdapter(BasePlatformAdapter):
             or metadata.get("final")
             or metadata.get("notify")
         )
-        if is_streaming and not is_final:
-            reply_data["delta"] = True
-        elif metadata.get("stream_finalize"):
+        is_room = bool(self._room_fields(thread_id))
+        text_out, delta_out = self._delta_payload(
+            thread_id,
+            message_id,
+            content,
+            streaming=is_streaming,
+            finalize=is_final,
+            is_room=is_room,
+        )
+        reply_data: Dict[str, Any] = {
+            "text": text_out[: self.MAX_MESSAGE_LENGTH],
+            "message_id": message_id,
+        }
+        if delta_out:
             reply_data["delta"] = True
         if is_final:
             reply_data["done"] = True
@@ -1204,6 +1257,16 @@ class HarnessMateAdapter(BasePlatformAdapter):
         * @Param: chat_id: 账号 ID；to_ws_session: 目标 ws_session_id；thread_id: 会话线程；content: 正文；message_id: 消息 ID；metadata: 元数据；finalize: 是否最终帧
         * @return：SendResult 发送结果
         """
+        if not str(thread_id or "").strip():
+            logger.warning(
+                "harness_mate 无法解析 thread_id: chat=%s metadata=%s",
+                chat_id,
+                metadata,
+            )
+            self._dump_undeliverable(
+                chat_id, metadata, reason="thread_id not resolved"
+            )
+            return SendResult(success=False, error="thread_id not resolved")
         if not to_ws_session:
             logger.warning(
                 "harness_mate 无法解析 to_ws_session: chat=%s thread=%s metadata=%s",
