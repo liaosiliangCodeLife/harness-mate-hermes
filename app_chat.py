@@ -37,7 +37,7 @@ from common import (
     strip_stream_cursor,
 )
 
-TOOL_STATUS_MARKERS = ("🔍", "📄", "⏳", "🛠", "🔧")
+TOOL_STATUS_MARKERS = ("🔍", "📄", "⏳", "🛠", "🔧", "💻", "🖥", "🦎")
 PROMPT = "App> "
 DEFAULT_GATEWAY_HOST = "ws-agent.alltman.com"
 DEFAULT_GATEWAY_PORT = "1443"

@@ -486,11 +486,12 @@ def _push_tool_progress(step: Dict[str, Any]) -> None:
         if not snap:
             logger.info("hm progress skip: empty snapshot tid=%s", thread_id)
             return
+        # 本轮已结束（done 后已清 mapping）：不再发孤儿进度帧
+        if not inst._turn_msg_id.get(tid):
+            logger.info("hm progress skip: turn closed tid=%s", tid)
+            return
         # 归属用本轮回复的消息 ID；取不到才回退老的 prog- 前缀（兼容未升级路径）
-        try:
-            turn_id = inst._turn_message_id(thread_id)
-        except Exception:
-            turn_id = ""
+        turn_id = str(inst._turn_msg_id.get(tid) or "")
         data = {
             "text": "",
             "message_id": turn_id or ("prog-" + thread_id),
@@ -1215,6 +1216,11 @@ class HarnessMateAdapter(BasePlatformAdapter):
                 reply_data["agent_thoughts"] = _steps
                 # 私聊链路前端读的是 tool_events（ConversationChatCard 收集 → message_info.tool_events），两个都发，兼容两条路
                 reply_data["tool_events"] = _steps
+        else:
+            # 非最终帧：仅当正文命中工具动作词表时打 status=tool（思考占位走 _send_typing）
+            _hint_text = str(reply_data.get("text") or "")
+            if _is_tool_hint_text(_hint_text, has_tool_events=_has_tool_hint_action(_hint_text)):
+                reply_data["status"] = "tool"
         reasoning = metadata.get("reasoning")
         if reasoning:
             reply_data["reasoning"] = reasoning
@@ -2225,6 +2231,68 @@ def _patch_harness_mate_thread_metadata() -> None:
         logger.debug("harness_mate 跳过 GatewayRunner 线程元数据补丁", exc_info=True)
 
     globals()["_HARNESS_MATE_THREAD_METADATA_PATCHED"] = True
+
+
+_TOOL_HINT_ACTION_VERBS = (
+    "运行代码",
+    "运行了",
+    "执行了",
+    "读取了",
+    "写入了",
+    "修改了",
+    "搜索",
+    "网页",
+    "查看",
+    "图片",
+    "加载了",
+    "派发",
+    "待办",
+    "记录",
+    "设置",
+    "定时",
+    "查询",
+    "会话",
+    "生成",
+    "语音",
+    "操作了",
+    "浏览器",
+    "电脑",
+)
+
+
+def _has_tool_hint_action(text: str) -> bool:
+    """正文是否包含工具动作词（与客户端词表一致）"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return any(verb in t for verb in _TOOL_HINT_ACTION_VERBS)
+
+
+def _is_tool_hint_text(text: str, *, has_tool_events: bool) -> bool:
+    """
+    * @Author Leon-liao
+    * @Function: _is_tool_hint_text(text, has_tool_events)
+    * @Description //与客户端同规则：判定是否为工具提示文本（emoji + 动作词 + 参数）
+    * @Date :2026/11/23 18:45:00
+    * @Param: text: 帧正文；has_tool_events: 本帧/本轮是否带工具事件
+    * @return：是工具提示返回 True
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.startswith(("💻", "🖥", "🔧", "⏳")):
+        return True
+    if not has_tool_events:
+        return False
+    first = next(iter(t), "")
+    cp = ord(first) if first else 0
+    is_emoji = (0x1F300 <= cp <= 0x1FAFF) or (0x2600 <= cp <= 0x27BF)
+    if not is_emoji:
+        return False
+    if len(t) > 120 or len(t.split("\n")) > 2:
+        return False
+    # 避免「✅ 已上线」这类正常短回复被当成工具提示
+    return _has_tool_hint_action(t)
 
 
 def _ensure_tool_trace_patch() -> None:

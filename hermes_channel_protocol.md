@@ -266,7 +266,7 @@ JWT Claims：
 | `message_id` | ✅ | 消息 ID；流式多帧共用 |
 | `delta` | 流式时 | `true` 表示增量帧 |
 | `done` | 流式结束时 | `true` 表示最终帧 |
-| `status` | ❌ | `"thinking"` 表示思考中 |
+| `status` | ❌ | `"thinking"` 表示思考中；`"tool"` 表示工具提示文本（不得写入正文） |
 | `reasoning` | ❌ | 思考过程文本（可选） |
 | `url` | 文件回复时 | 文件可访问地址。本地文件先经 `POST /open-api/upload-file` 上传，`session_id` 使用当前对端 `ws_session_id` |
 | `file_name` | 文件回复时 | 文件名 |
@@ -290,6 +290,23 @@ Hermes 在生成回复前可能发送：
   }
 }
 ```
+
+### 6.5 工具过程文本与状态帧
+
+约定如下（插件与客户端须遵守）：
+
+1. **工具提示文本**：emoji + 动作 + 参数，单/双行、≤120 字；必须带 `status: "tool"`；客户端一律不得写入消息正文
+2. **思考占位**：`status: "thinking"`，正文是「思考中...」这类占位，同样不得进正文
+3. **工具进度帧**：空正文 + `tool_events`，合成 id `prog-<thread_id>`，服务端只写 status=0 占位行，不进历史
+4. **delta 语义**：非 done 帧只发**新增后缀**（`delta: true`），客户端按 `message_id` 累加；done 帧发**全量正文 + 全量 tool_events**，客户端用 done 覆盖
+5. **落库**：只有 done 帧落 message 表（按 `conversation_id + message_id` 幂等）；空正文 + 有 tool_events 的轮次也要落库，但客户端展示时过滤
+6. **群聊**：正文不发 SSE，只发 `room_unread`（unread/preview/seq），正文由客户端 `after_seq` 单独拉
+7. **审批**：`approval_new` / `approval_decided` 不走消息链路
+8. **多会话**：工具步骤必须按 thread 分桶，禁止全局单例累积（会串步）
+9. **重复/迟到帧**：同一 message_id 幂等；done 之后迟到的进度帧不得把状态改回 0
+10. **重启**：`_reply_targets` 在插件内存里，重启即丢，需要 hello 帧重新登记；期间的消息只能靠 `/sync/pull` 补
+
+客户端兼容：优先判断 `status == "tool"` → 直接当提示丢弃；没有该字段时，按 emoji 结构判定兜底（旧白名单前缀 `💻🖥🔧⏳`，或首字符落在 `U+1F300–U+1FAFF` / `U+2600–U+27BF` 且长度 ≤120、行数 ≤2，且本帧带 `tool_events`）。
 
 ---
 
