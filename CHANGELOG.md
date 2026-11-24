@@ -2,6 +2,11 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.21 — 2026-11-24 10:25
+- 修复（工具步骤跨会话串台）：步骤归属改为「turn → thread」显式绑定（入站 `bind_turn`），pre/post tool hook 用 `thread_of_turn(turn_id)` 反查会话，并把 `thread_id/turn_id` 显式传给 `record_start/record_complete/_push_tool_progress`，不再依赖会被其它会话入站覆盖的全局 `_current_thread`
+- 实测：A 会话跑工具期间 B 会话入站，A 的后续步骤仍记在 A 桶、B 桶为空（改前 A 的 4→15 步全部记到 B 并推到 B）
+- 发布版本：插件 `0.6.20` → `0.6.21`
+
 ## 0.6.20 — 2026-11-23 23:05
 - 修复（彻底隔离工具步骤归属）：步骤桶从 `thread` 单键改为 `thread|turn` 双键，`set_turn()` 在每轮开始绑定 message_id；`drain(thread_id, turn_id)` 只取本轮、并清理同线程旧轮残留
 - 修复（进度帧串步）：`_push_tool_progress` 的 `snapshot()` 传入本轮 turn_id，不再把旧轮步骤带进新轮

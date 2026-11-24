@@ -460,7 +460,7 @@ _HM_INSTANCE: Any = None
 _HM_LOOP: Any = None
 
 
-def _push_tool_progress(step: Dict[str, Any]) -> None:
+def _push_tool_progress(step: Dict[str, Any], turn_id: str = "", thread_id: str = "") -> None:
     """工具执行完一步就推一帧状态帧（带当前线程的步骤快照），供客户端实时显示执行过程"""
     inst = _HM_INSTANCE
     loop = _HM_LOOP
@@ -469,7 +469,7 @@ def _push_tool_progress(step: Dict[str, Any]) -> None:
         return
     try:
         from . import tool_trace as _tt
-        tid = _tt.current_thread()
+        tid = str(thread_id or "").strip() or _tt.current_thread()
         if not tid:
             logger.info("hm progress skip: empty thread")
             return
@@ -482,20 +482,28 @@ def _push_tool_progress(step: Dict[str, Any]) -> None:
             logger.info("hm progress skip: no target tid=%s keys=%s", tid, list(getattr(inst, "_reply_targets", {}).keys())[:5])
             return
         acct, thread_id, peer = target
-        turn_id = str(inst._turn_msg_id.get(tid) or "")
+        turn_id = str(turn_id or "").strip()
         snap = _tt.snapshot(thread_id, turn_id)
         if not snap:
             logger.info("hm progress skip: empty snapshot tid=%s", thread_id)
             return
         # 本轮已结束（done 后已清 mapping）：不再发孤儿进度帧
-        if not inst._turn_msg_id.get(tid):
+        if turn_id:
+            if turn_id not in inst._msg_by_turn:
+                logger.info("hm progress skip: turn closed tid=%s turn=%s", tid, turn_id)
+                return
+        elif not inst._turn_msg_id.get(tid):
             logger.info("hm progress skip: turn closed tid=%s", tid)
             return
         # 归属用本轮回复的消息 ID；取不到才回退老的 prog- 前缀（兼容未升级路径）
-        turn_id = str(inst._turn_msg_id.get(tid) or "")
+        message_id = (
+            inst._msg_by_turn.get(turn_id)
+            or inst._turn_message_id(thread_id)
+            or ("prog-" + thread_id)
+        )
         data = {
             "text": "",
-            "message_id": turn_id or ("prog-" + thread_id),
+            "message_id": message_id,
             "status": "thinking",
             "agent_thoughts": snap,
             "tool_events": snap,
@@ -572,6 +580,10 @@ class HarnessMateAdapter(BasePlatformAdapter):
         self._stream_sent: Dict[str, str] = {}
         # 本轮回复的消息 ID：进度帧 / 正文帧 / done 帧共用，保证服务端按 message_id 归并成一条
         self._turn_msg_id: Dict[str, str] = {}
+        # turn_id → 本轮消息 ID（Hermes 每轮唯一，天然按轮隔离）
+        self._msg_by_turn: Dict[str, str] = {}
+        # thread_id → 最近一次工具 hook 绑定到的 turn_id（正文帧用它找本轮 message_id）
+        self._active_turn_by_thread: Dict[str, str] = {}
         self._typing_last_sent: Dict[Tuple[str, str], float] = {}
         self._typing_lock = asyncio.Lock()
         # 审批：approval_id → {session_key, chat_id, thread_id, peer, timer}
@@ -948,13 +960,15 @@ class HarnessMateAdapter(BasePlatformAdapter):
                     "room_id": room_id,
                     "reply_to": room_reply_to,
                 }
+            # 新的一轮必须换新的消息 ID：正文帧与工具进度帧都靠它取同一条
+            # （旧轮的帧仍走 _msg_by_turn[旧 turn]，不会因为 renew 被抢走）
+            turn_id = self._turn_message_id(thread_id, renew=True)
             try:
                 from . import tool_trace as _tt_in
                 _tt_in.set_thread(thread_id)
+                _tt_in.bind_turn(thread_id, turn_id)
             except Exception:
                 pass
-            # 新一轮开始：先生成本轮消息 ID，后续进度帧/正文帧/done 帧共用它
-            self._turn_message_id(thread_id, renew=True)
             self._last_inbound_by_chat[account_id] = {
                 "thread_id": thread_id,
                 "room_id": room_id,
@@ -1032,6 +1046,33 @@ class HarnessMateAdapter(BasePlatformAdapter):
     def _clear_turn_message_id(self, thread_id: str) -> None:
         """本轮结束（done 已发）后清掉映射，下一轮重新生成，避免跨轮复用同一个消息 ID"""
         self._turn_msg_id.pop(str(thread_id or "").strip(), None)
+
+    def _bind_turn(self, thread_id: str, turn_id: str) -> str:
+        """把 Hermes 的 turn_id 绑定到一个稳定的消息 ID；返回该消息 ID。"""
+        tid = str(thread_id or "").strip()
+        turn = str(turn_id or "").strip()
+        if not turn:
+            # 兼容：老版本 Hermes 不带 turn_id，退回线程级逻辑
+            return self._turn_message_id(tid)
+        msg_id = self._msg_by_turn.get(turn)
+        if not msg_id:
+            # 必须复用本轮入站时生成的 ID，否则正文帧（入站 ID）和工具进度帧（这里新建）
+            # 会落到两条消息上，表现为「正文一条 + 工具一条」或者空壳消息
+            msg_id = self._turn_message_id(tid) or str(uuid.uuid4())
+            self._msg_by_turn[turn] = msg_id
+        if tid:
+            self._active_turn_by_thread[tid] = turn
+        return msg_id
+
+    def _msg_id_for_thread(self, thread_id: str) -> str:
+        """正文帧用：取该线程当前活跃 turn 的消息 ID；没有则退回线程级/新建。"""
+        tid = str(thread_id or "").strip()
+        turn = self._active_turn_by_thread.get(tid, "")
+        if turn:
+            msg = self._msg_by_turn.get(turn)
+            if msg:
+                return msg
+        return self._turn_message_id(tid)
 
     def _dump_undeliverable(
         self,
@@ -1217,7 +1258,9 @@ class HarnessMateAdapter(BasePlatformAdapter):
             reply_data["done"] = True
             try:
                 from . import tool_trace as _tt
-                _steps = _tt.drain(thread_id, message_id)
+                # 优先按 Hermes turn_id 取桶；无 turn 时退回 message_id（老路径）
+                turn = self._active_turn_by_thread.get(str(thread_id or "").strip(), "")
+                _steps = _tt.drain(thread_id, turn or message_id)
                 logger.info("harness_mate drain agent_thoughts=%d", len(_steps))
             except Exception:
                 _steps = []
@@ -1325,9 +1368,19 @@ class HarnessMateAdapter(BasePlatformAdapter):
         ok = await self._send_ws(to_ws_session, business_payload)
         if not ok:
             return SendResult(success=False, error="ws send failed")
-        # done 已送达：清掉本轮消息 ID，下一轮入站重新生成（避免跨轮复用）
+        # done 已送达：清掉本轮 turn / 消息 ID 映射（避免跨轮复用）
         if reply_data.get("done"):
-            self._clear_turn_message_id(thread_id)
+            turn = self._active_turn_by_thread.get(thread_id, "")
+            if turn and self._msg_by_turn.get(turn) == message_id:
+                self._msg_by_turn.pop(turn, None)
+                self._active_turn_by_thread.pop(thread_id, None)
+                try:
+                    from . import tool_trace as _tt
+                    _tt.reset(thread_id)
+                except Exception:
+                    pass
+            if self._turn_msg_id.get(thread_id) == message_id:
+                self._clear_turn_message_id(thread_id)
         self._reset_typing_throttle(to_ws_session, thread_id)
         logger.debug(
             "harness_mate 已发送 reply: peer=%s thread=%s msg=%s delta=%s done=%s len=%d",
@@ -1975,10 +2028,10 @@ class HarnessMateAdapter(BasePlatformAdapter):
         metadata = metadata or {}
         _ensure_tool_trace_patch()
         thread_id, to_ws_session = self._resolve_target(chat_id, metadata)
-        # 正文帧复用本轮消息 ID：与进度帧、done 帧归并成同一条消息
+        # 正文帧复用本轮消息 ID：优先取活跃 turn 绑定的 ID，与进度帧、done 帧归并
         msg_id = str(
             metadata.get("message_id")
-            or self._turn_message_id(thread_id)
+            or self._msg_id_for_thread(thread_id)
             or uuid.uuid4()
         )
         try:
@@ -2386,7 +2439,22 @@ def _hm_hook_pre_tool_call(tool_name=None, args=None, tool_call_id=None, **kwarg
     """官方 pre_tool_call hook：工具开始执行（在 agent 进程内触发，跨进程可靠）"""
     try:
         from . import tool_trace as _tt
-        _tt.record_start(str(tool_call_id or ""), str(tool_name or ""), args if isinstance(args, dict) else {})
+        turn_id = str(kwargs.get("turn_id") or "").strip()
+        thread_id = _tt.thread_of_turn(turn_id) or _tt.current_thread()
+        if thread_id:
+            _tt.set_thread(thread_id)
+        inst = _HM_INSTANCE
+        if inst is not None:
+            inst._bind_turn(thread_id, turn_id)
+        if turn_id:
+            _tt.set_turn(turn_id)
+        _tt.record_start(
+            str(tool_call_id or ""),
+            str(tool_name or ""),
+            args if isinstance(args, dict) else {},
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
         logger.info("harness_mate hook pre_tool_call name=%s", tool_name)
     except Exception:
         logger.debug("harness_mate hook pre_tool_call 失败", exc_info=True)
@@ -2397,15 +2465,26 @@ def _hm_hook_post_tool_call(tool_name=None, args=None, tool_call_id=None, result
     """官方 post_tool_call hook：工具执行结束，补齐耗时与结果摘要，并实时推一帧进度"""
     try:
         from . import tool_trace as _tt
+        turn_id = str(kwargs.get("turn_id") or "").strip()
+        thread_id = _tt.thread_of_turn(turn_id) or _tt.current_thread()
+        if thread_id:
+            _tt.set_thread(thread_id)
+        inst = _HM_INSTANCE
+        if inst is not None:
+            inst._bind_turn(thread_id, turn_id)
+        if turn_id:
+            _tt.set_turn(turn_id)
         step = _tt.record_complete(
             str(tool_call_id or ""),
             str(tool_name or ""),
             float(duration_ms or 0) / 1000.0,
             False,
             result,
+            thread_id=thread_id,
+            turn_id=turn_id,
         )
         try:
-            _push_tool_progress(step)  # type: ignore[arg-type]
+            _push_tool_progress(step, turn_id=turn_id, thread_id=thread_id)  # type: ignore[arg-type]
         except Exception:
             logger.debug("harness_mate 进度帧推送异常", exc_info=True)
         logger.info("harness_mate hook post_tool_call name=%s", tool_name)

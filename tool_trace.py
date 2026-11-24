@@ -23,6 +23,7 @@ MAX_TOOL_INPUT = 500
 _lock = threading.Lock()
 _inflight: dict[str, dict] = {}
 _steps: dict[str, list[dict]] = {}
+_turn_thread: dict[str, str] = {}
 _current_thread = ""
 _current_turn = ""
 
@@ -30,6 +31,25 @@ _current_turn = ""
 def current_thread() -> str:
     """当前处理的会话线程"""
     return str(_current_thread or "")
+
+
+def bind_turn(thread_id: str, turn_id: str) -> None:
+    """把本轮 turn 钉到入站时的 thread，后续工具步骤按 turn 找回，不被全局 _current_thread 覆盖"""
+    t = str(thread_id or "").strip()
+    u = str(turn_id or "").strip()
+    if not t or not u:
+        return
+    with _lock:
+        _turn_thread[u] = t
+
+
+def thread_of_turn(turn_id: str) -> str:
+    """按 turn 查入站时绑定的 thread；查不到返回空串"""
+    u = str(turn_id or "").strip()
+    if not u:
+        return ""
+    with _lock:
+        return str(_turn_thread.get(u) or "")
 
 
 def snapshot(thread_id: str = "", turn_id: str = "") -> list:
@@ -126,7 +146,13 @@ def _serialize_observation(result: Any, is_error: bool) -> str:
     return _truncate(raw, MAX_OBSERVATION)
 
 
-def record_start(call_id: str, name: str, args: dict | None) -> None:
+def record_start(
+        call_id: str,
+        name: str,
+        args: dict | None,
+        thread_id: str = "",
+        turn_id: str = "",
+) -> None:
     """
     * @Author Leon-liao
     * @Function:
@@ -140,8 +166,8 @@ def record_start(call_id: str, name: str, args: dict | None) -> None:
     with _lock:
         _inflight[str(call_id or "")] = {
             "name": name or "tool",
-            "thread": _current_thread,
-            "turn": _current_turn,
+            "thread": str(thread_id or _current_thread or ""),
+            "turn": str(turn_id or _current_turn or ""),
             "args": args if isinstance(args, dict) else {},
             "started": time.time(),
         }
@@ -153,6 +179,8 @@ def record_complete(
         duration: float,
         is_error: bool,
         result: Any,
+        thread_id: str = "",
+        turn_id: str = "",
 ) -> None:
     """
     * @Author Leon-liao
@@ -168,16 +196,23 @@ def record_complete(
     with _lock:
         started_meta = _inflight.pop(key, None)
         args = {}
-        step_thread = _current_thread
-        step_turn = _current_turn
+        # 优先入参 → inflight 快照 → 全局（避免并发会话覆盖全局后串桶）
+        step_thread = str(thread_id or "").strip()
+        step_turn = str(turn_id or "").strip()
         if isinstance(started_meta, dict):
-            step_thread = str(started_meta.get("thread") or step_thread)
-            step_turn = str(started_meta.get("turn") or step_turn)
+            if not step_thread:
+                step_thread = str(started_meta.get("thread") or "")
+            if not step_turn:
+                step_turn = str(started_meta.get("turn") or "")
             maybe_args = started_meta.get("args")
             if isinstance(maybe_args, dict):
                 args = maybe_args
             if not name:
                 name = str(started_meta.get("name") or "tool")
+        if not step_thread:
+            step_thread = _current_thread
+        if not step_turn:
+            step_turn = _current_turn
         step = {
             "id": key or str(uuid.uuid4()),
             "event": "agent_action",
@@ -237,6 +272,8 @@ def reset(thread_id: str = "") -> None:
             prefix = f"{t}|"
             for k in [k for k in _steps.keys() if k.startswith(prefix)]:
                 _steps.pop(k, None)
+            for u in [u for u, v in _turn_thread.items() if v == t]:
+                _turn_thread.pop(u, None)
         # 空桶是 hook 拿不到线程时的兜底，跨轮残留同样要清
         _steps.pop("", None)
         _steps.pop("|", None)
