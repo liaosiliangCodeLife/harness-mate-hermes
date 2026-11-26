@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -493,6 +494,123 @@ async def materialize_inbound_file(inbound_file: Dict[str, str]) -> str:
 _HM_INSTANCE: Any = None
 _HM_LOOP: Any = None
 
+# ---------------------------------------------------------------------------
+# 运行态心跳：每 30s 向平台刷一帧 running，api 侧 Redis TTL 60s 续期。
+# 只表达「在不在干活」，不带工具名/参数/结果；结束帧仍由回复链路照常发。
+# ---------------------------------------------------------------------------
+_HM_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_HM_ACTIVE_RUNS: Dict[str, Dict[str, Any]] = {}
+_HM_ACTIVE_RUNS_LOCK = threading.Lock()
+_HM_HEARTBEAT_THREAD: Optional[threading.Thread] = None
+
+
+def _hm_run_key(account_id: str, thread_id: str) -> str:
+    """活跃 turn 的登记键：一个会话只有一条心跳"""
+    return f"{account_id}:{thread_id}"
+
+
+def _hm_mark_running(account_id: str, thread_id: str, peer_session: str) -> None:
+    """
+    * @Author Leon-liao
+    * @Function: _hm_mark_running(account_id, thread_id, peer_session)
+    * @Description //入站消息开始处理时登记活跃 turn，并立刻补一帧 running（不必等 30s）
+    * @Date :2026/11/26 18:40:00
+    * @Param: account_id 账号；thread_id 会话；peer_session 回包目标
+    * @return：无
+    """
+    account = str(account_id or "").strip()
+    thread = str(thread_id or "").strip()
+    if not account or not thread:
+        return
+    with _HM_ACTIVE_RUNS_LOCK:
+        _HM_ACTIVE_RUNS[_hm_run_key(account, thread)] = {
+            "account_id": account,
+            "thread_id": thread,
+            "peer": str(peer_session or "").strip(),
+        }
+    logger.info("hm run start: acct=%s tid=%s peer=%s", account, thread, peer_session)
+    _hm_ensure_heartbeat_thread()
+    _hm_heartbeat_once()
+
+
+def _hm_mark_idle(account_id: str, thread_id: str) -> None:
+    """
+    * @Author Leon-liao
+    * @Function: _hm_mark_idle(account_id, thread_id)
+    * @Description //本轮结束先摘活跃登记，再让调用方发 done；顺序反了会被心跳重新点亮状态
+    * @Date :2026/11/26 18:40:00
+    * @Param: account_id 账号；thread_id 会话
+    * @return：无
+    """
+    account = str(account_id or "").strip()
+    thread = str(thread_id or "").strip()
+    if not account or not thread:
+        return
+    with _HM_ACTIVE_RUNS_LOCK:
+        _HM_ACTIVE_RUNS.pop(_hm_run_key(account, thread), None)
+
+
+def _hm_clear_active_runs() -> None:
+    """WS 断开时清空：重连后回包目标不确定，状态交给 api 侧 TTL 自然过期"""
+    with _HM_ACTIVE_RUNS_LOCK:
+        _HM_ACTIVE_RUNS.clear()
+
+
+def _hm_heartbeat_once() -> None:
+    """把当前所有活跃 turn 各发一帧 running（空正文，不带工具事件）"""
+    inst = _HM_INSTANCE
+    loop = _HM_LOOP
+    if inst is None or loop is None or getattr(loop, "is_closed", lambda: True)():
+        return
+    with _HM_ACTIVE_RUNS_LOCK:
+        runs = list(_HM_ACTIVE_RUNS.values())
+    if runs:
+        logger.info("hm heartbeat tick: runs=%d", len(runs))
+    for run in runs:
+        try:
+            payload: Dict[str, Any] = {
+                "type": TYPE_REPLY,
+                "account_id": run["account_id"],
+                "thread_id": run["thread_id"],
+                "bot_id": getattr(inst, "bot_id", ""),
+                "data": {
+                    "text": "",
+                    "message_id": "",
+                    "status": "running",
+                    "heartbeat": True,
+                    "done": False,
+                },
+            }
+            try:
+                payload.update(inst._room_fields(run["thread_id"]))
+            except Exception:
+                pass
+            asyncio.run_coroutine_threadsafe(inst._send_ws(run["peer"], payload), loop)
+        except Exception:
+            logger.debug("hm 心跳发送失败", exc_info=True)
+
+
+def _hm_heartbeat_loop() -> None:
+    """守护线程：每 30s 刷一次；没有活跃 turn 时什么都不发"""
+    while True:
+        time.sleep(_HM_HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            _hm_heartbeat_once()
+        except Exception:
+            logger.debug("hm 心跳循环异常", exc_info=True)
+
+
+def _hm_ensure_heartbeat_thread() -> None:
+    """首次登记时起守护线程（daemon，随进程退出，不做 join）"""
+    global _HM_HEARTBEAT_THREAD
+    if _HM_HEARTBEAT_THREAD is not None and _HM_HEARTBEAT_THREAD.is_alive():
+        return
+    _HM_HEARTBEAT_THREAD = threading.Thread(
+        target=_hm_heartbeat_loop, name="hm-heartbeat", daemon=True
+    )
+    _HM_HEARTBEAT_THREAD.start()
+
+
 
 def _push_tool_progress(step: Dict[str, Any], turn_id: str = "", thread_id: str = "") -> None:
     """工具执行完一步就推一帧状态帧（带当前线程的步骤快照），供客户端实时显示执行过程"""
@@ -844,6 +962,7 @@ class HarnessMateAdapter(BasePlatformAdapter):
             await self._cleanup_ws()
             self._dedup.clear()
             self._reply_targets.clear()
+            _hm_clear_active_runs()
             self._peer_by_device.clear()
             self._typing_last_sent.clear()
             self._mark_disconnected()
@@ -1019,6 +1138,8 @@ class HarnessMateAdapter(BasePlatformAdapter):
             self._reply_targets[(account_id, thread_id)] = peer_session
             self._peer_by_device[device_id] = peer_session
             self._last_peer_session = peer_session
+            # 运行态心跳：本轮从这一秒开始算在干活，立刻补一帧再每 30s 续期
+            _hm_mark_running(account_id, thread_id, peer_session)
 
             message_type = MessageType.TEXT
             media_urls: List[str] = []
@@ -1398,6 +1519,8 @@ class HarnessMateAdapter(BasePlatformAdapter):
         self._reply_fingerprints[cache_key] = fingerprint
         if reply_data.get("done"):
             self._reply_fingerprints.pop(cache_key, None)
+            # 先摘活跃登记再发 done：顺序反了心跳会把状态重新点亮
+            _hm_mark_idle(chat_id, thread_id)
 
         business_payload = {
             "type": TYPE_REPLY,
