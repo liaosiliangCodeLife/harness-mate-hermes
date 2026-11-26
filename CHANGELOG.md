@@ -2,6 +2,12 @@
 
 > 约定：每次提交前，先在本文件顶部新增一条 `## <版本号> — <YYYY-MM-DD HH:MM>`，列出这次提交里本模块的改动。版本号是平台级的（取 `ui/package.json` 的 `version`），每次提交 +1；改动落在哪个模块，就写进哪个模块的记录。**插件自身的发布版本号另见 `plugin/plugin.yaml` 的 `version`**（对 GitHub Release 用的那个），两份不要混。
 
+## 0.6.22 — 2026-11-26 18:05
+- 修复（多图/多附件丢失）：入站附件从「只取 files[0]」改为全量提取（新增 `_extract_inbound_files`，去重、上限 `MAX_INBOUND_FILES=9`），`media_urls`/`media_types` 全部上抛，正文补齐每一个 URL 兜底；实测「正文 + 3 张图」改前只有第 1 张到 Hermes，改后 3 张全到
+- 兼容：`_extract_inbound_file()` 保留为薄封装（取第一个），其余调用点零改动
+- 校验：用平台真实 payload 复刻（files 3 张）单测，返回 3 条且去重正常；纯媒体 kind+content 形态仍返回 1 条
+- 发布版本：插件 `0.6.21` → `0.6.22`
+
 ## 0.6.21 — 2026-11-24 10:25
 - 修复（工具步骤跨会话串台）：步骤归属改为「turn → thread」显式绑定（入站 `bind_turn`），pre/post tool hook 用 `thread_of_turn(turn_id)` 反查会话，并把 `thread_id/turn_id` 显式传给 `record_start/record_complete/_push_tool_progress`，不再依赖会被其它会话入站覆盖的全局 `_current_thread`
 - 实测：A 会话跑工具期间 B 会话入站，A 的后续步骤仍记在 A 桶、B 桶为空（改前 A 的 4→15 步全部记到 B 并推到 B）

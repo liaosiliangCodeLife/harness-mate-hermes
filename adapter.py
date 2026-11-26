@@ -267,56 +267,22 @@ def _extract_inbound_text(raw: Dict[str, Any], data: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_inbound_file(data: Dict[str, Any], nested: Dict[str, Any]) -> Dict[str, str]:
+# 一条消息最多上抛的附件数（平台单条消息实测可带 3-9 张图，防止异常 payload 打爆缓存目录）
+MAX_INBOUND_FILES = 9
+
+
+def _normalize_inbound_file(source: Dict[str, Any]) -> Dict[str, str]:
     """
     * @Author Leon-liao
-    * @Function: _extract_inbound_file(data, nested)
-    * @Description //从入站 message 中提取已上传文件的 URL、名称和类型
-    * @Date :2026/11/06 20:45:00
-    * @Param: data: 业务 data；nested: data.data
-    * @return：包含 url、file_name、media_type、mime_type 的字典；没有文件时为空字典
+    * @Function: _normalize_inbound_file(source)
+    * @Description //把单个附件对象规范成 url/file_name/media_type/mime_type；无 url 返回空字典
+    * @Date :2026/11/26 17:55:00
+    * @Param: source: 平台下发的单个附件对象
+    * @return：规范后的附件字典；无 url 时为空字典
     """
-    candidates: List[Dict[str, Any]] = []
-    for source in (nested, data):
-        if not isinstance(source, dict):
-            continue
-        url = str(source.get("url") or source.get("file_url") or "").strip()
-        if url:
-            candidates.append(source)
-            break
-        files = source.get("files")
-        if isinstance(files, list):
-            for item in files:
-                if isinstance(item, dict) and str(item.get("url") or "").strip():
-                    candidates.append(item)
-                    break
-            if candidates:
-                break
-    # 群聊媒体：kind + content(URL)，无 url/files
-    if not candidates:
-        for source in (nested, data):
-            if not isinstance(source, dict):
-                continue
-            kind = str(source.get("kind") or "").strip().lower()
-            content = str(source.get("content") or "").strip()
-            if kind in {"image", "file", "audio", "video"} and (
-                content.startswith("http://") or content.startswith("https://")
-            ):
-                extra = source.get("extra") if isinstance(source.get("extra"), dict) else {}
-                candidates.append(
-                    {
-                        "url": content,
-                        "name": str((extra or {}).get("name") or "").strip(),
-                        "media_type": kind,
-                        "size": (extra or {}).get("size"),
-                    }
-                )
-                break
-    if not candidates:
-        return {}
-
-    source = candidates[0]
     url = str(source.get("url") or source.get("file_url") or "").strip()
+    if not url:
+        return {}
     file_name = str(source.get("file_name") or source.get("name") or "").strip()
     hinted = str(source.get("media_type") or "").strip().lower()
     if hinted in {"image", "audio", "video", "file"}:
@@ -334,6 +300,74 @@ def _extract_inbound_file(data: Dict[str, Any], nested: Dict[str, Any]) -> Dict[
         "media_type": media_type,
         "mime_type": mime_type,
     }
+
+
+def _extract_inbound_files(data: Dict[str, Any], nested: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    * @Author Leon-liao
+    * @Function: _extract_inbound_files(data, nested)
+    * @Description //从入站 message 中提取全部附件（一条消息可带多张图/多个文件）
+     * 平台 payload.files 是数组；只取 files[0] 会让「文字 + 3 张图」只剩第一张（用户实测丢图）。
+    * @Date :2026/11/26 17:55:00
+    * @Param: data: 业务 data；nested: data.data
+    * @return：附件列表（已规范化、去重、最多 MAX_INBOUND_FILES 个）；没有文件时为空列表
+    """
+    raw_items: List[Dict[str, Any]] = []
+    for source in (nested, data):
+        if not isinstance(source, dict):
+            continue
+        if str(source.get("url") or source.get("file_url") or "").strip():
+            raw_items.append(source)
+            break
+        files = source.get("files")
+        if isinstance(files, list) and files:
+            raw_items.extend([item for item in files if isinstance(item, dict)])
+            break
+    # 群聊纯媒体：kind + content(URL)，无 url/files
+    if not raw_items:
+        for source in (nested, data):
+            if not isinstance(source, dict):
+                continue
+            kind = str(source.get("kind") or "").strip().lower()
+            content = str(source.get("content") or "").strip()
+            if kind in {"image", "file", "audio", "video"} and (
+                content.startswith("http://") or content.startswith("https://")
+            ):
+                extra = source.get("extra") if isinstance(source.get("extra"), dict) else {}
+                raw_items.append(
+                    {
+                        "url": content,
+                        "name": str((extra or {}).get("name") or "").strip(),
+                        "media_type": kind,
+                        "size": (extra or {}).get("size"),
+                    }
+                )
+                break
+
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for item in raw_items:
+        norm = _normalize_inbound_file(item)
+        if not norm or norm["url"] in seen:
+            continue
+        seen.add(norm["url"])
+        out.append(norm)
+        if len(out) >= MAX_INBOUND_FILES:
+            break
+    return out
+
+
+def _extract_inbound_file(data: Dict[str, Any], nested: Dict[str, Any]) -> Dict[str, str]:
+    """
+    * @Author Leon-liao
+    * @Function: _extract_inbound_file(data, nested)
+    * @Description //兼容旧调用：只返回第一个附件；新代码请用 _extract_inbound_files
+    * @Date :2026/11/06 20:45:00
+    * @Param: data: 业务 data；nested: data.data
+    * @return：包含 url、file_name、media_type、mime_type 的字典；没有文件时为空字典
+    """
+    files = _extract_inbound_files(data, nested)
+    return files[0] if files else {}
 
 
 def _image_ext(data: bytes, fallback: str) -> str:
@@ -912,9 +946,13 @@ class HarnessMateAdapter(BasePlatformAdapter):
         try:
             nested = _parse_data_field(data.get("data"))
             text = _extract_inbound_text(data, nested)
-            inbound_file = _extract_inbound_file(data, nested)
-            if inbound_file and inbound_file["url"] not in text:
-                text = f"{text}\n{inbound_file['url']}".strip() if text else inbound_file["url"]
+            inbound_files = _extract_inbound_files(data, nested)
+            if inbound_files:
+                # 多附件：把每个 URL 都补进正文兜底（落地失败的附件至少还能从正文点开）
+                missing_urls = [item["url"] for item in inbound_files if item["url"] not in text]
+                if missing_urls:
+                    joined = "\n".join(missing_urls)
+                    text = f"{text}\n{joined}".strip() if text else joined
             if not text:
                 logger.debug("harness_mate 入站消息无文本内容，已忽略")
                 return
@@ -985,18 +1023,23 @@ class HarnessMateAdapter(BasePlatformAdapter):
             message_type = MessageType.TEXT
             media_urls: List[str] = []
             media_types: List[str] = []
-            if inbound_file:
+            primary_media_type = ""
+            for inbound_file in inbound_files:
                 # 平台推的是 COS 的 https URL；Hermes 准入层只收「本机绝对路径的常规文件」，
                 # 直接塞 URL 会被判 invalid_params 并连正文一起丢弃 —— 先下载落地再上抛。
                 local_path = await materialize_inbound_file(inbound_file)
-                if local_path:
-                    media_urls = [local_path]
-                    media_types = [inbound_file["mime_type"]]
-                    message_type = {
-                        "image": MessageType.PHOTO,
-                        "video": MessageType.VIDEO,
-                        "audio": MessageType.AUDIO,
-                    }.get(inbound_file["media_type"], MessageType.DOCUMENT)
+                if not local_path:
+                    continue
+                media_urls.append(local_path)
+                media_types.append(inbound_file["mime_type"])
+                if not primary_media_type:
+                    primary_media_type = inbound_file["media_type"]
+            if media_urls:
+                message_type = {
+                    "image": MessageType.PHOTO,
+                    "video": MessageType.VIDEO,
+                    "audio": MessageType.AUDIO,
+                }.get(primary_media_type, MessageType.DOCUMENT)
 
             event = MessageEvent(
                 source=self.build_source(
